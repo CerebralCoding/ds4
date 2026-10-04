@@ -231,12 +231,8 @@ int main(int argc, char **argv) {
                    f.experts, widths[c]);
             continue;
         }
-        /* gate ne11=1 broadcasts x. The fused IQ2 kernel also uses idx%ne11
-         * for gate/up stores: only their first mid_dim entries are shared scratch,
-         * with no defined winning expert. Mid instead uses idx and saves all
-         * selected rows; mid/out are deterministic observable outputs. */
         /* Eight routes consume all per-expert Q2 rows, including with the tuned down path. */
-        const uint32_t count[OUTPUTS] = {f.mid_dim, f.mid_dim, f.selected * f.mid_dim,
+        const uint32_t count[OUTPUTS] = {f.selected * f.mid_dim, f.selected * f.mid_dim, f.selected * f.mid_dim,
                                          glm53 ? f.selected * widths[c] : 0, widths[c]};
         const unsigned variants = (full_experts || glm53) && c == 0 && !reference_only ? 2 : 1;
         for (unsigned variant = 0; variant < variants; variant++) {
@@ -297,7 +293,7 @@ int main(int argc, char **argv) {
                                         f.experts, full_experts || profile ? name : "default", widths[c], with_addend, route, run, names[i], j, bits);
                                 goto done;
                             }
-                            if (run && !(i < 2 && active) &&
+                            if (run &&
                                 memcmp(&reference[i][j], &actual[j], sizeof(float))) {
                                 memcpy(&expected, &reference[i][j], sizeof(expected));
                                 fprintf(stderr, "Q2 mismatch experts=%u variant=%s width=%u addend=%d route=%u run=%u %s[%u] ref=0x%08x actual=0x%08x\n",

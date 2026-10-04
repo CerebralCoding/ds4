@@ -3012,6 +3012,35 @@ static void test_metal_inplace_rope_pair_exact(void) {
     TEST_ASSERT(total_affine_tail_mismatch == 0);
 }
 
+static void test_metal_fp8_kv_tail(void) {
+    enum { head_dim = 128, rows = 3, guard = 16 };
+    const uint32_t widths[] = {1, 63, 64, 65, 80, 127, 128};
+    float input[rows * head_dim + guard];
+    float output[rows * head_dim + guard];
+    ds4_gpu_tensor *tensor = ds4_gpu_tensor_alloc(sizeof(input));
+    TEST_ASSERT(tensor != NULL);
+    if (!tensor) return;
+    for (size_t c = 0; c < sizeof(widths) / sizeof(widths[0]); c++) {
+        const uint32_t width = widths[c];
+        for (uint32_t row = 0; row < rows; row++) {
+            for (uint32_t i = 0; i < head_dim; i++) {
+                /* Exact FP8 values with very different scales in adjacent
+                 * blocks expose stale reduction lanes in a partial block. */
+                input[row * head_dim + i] = i >= width ? 123.4567f :
+                    (i < 64 && width >= 64 ? 448.0f : 0.0009765625f);
+            }
+        }
+        for (uint32_t i = rows * head_dim; i < rows * head_dim + guard; i++)
+            input[i] = -987.6543f;
+        TEST_ASSERT(ds4_gpu_tensor_write(tensor, 0, input, sizeof(input)));
+        TEST_ASSERT(ds4_gpu_dsv4_fp8_kv_quantize_tensor(
+                tensor, rows, head_dim, head_dim - width));
+        TEST_ASSERT(ds4_gpu_tensor_read(tensor, 0, output, sizeof(output)));
+        TEST_ASSERT(memcmp(input, output, sizeof(input)) == 0);
+    }
+    ds4_gpu_tensor_free(tensor);
+}
+
 static void test_metal_contiguous_f32_f16_roundtrip_exact(void) {
     typedef struct {
         uint32_t n;
@@ -5487,6 +5516,7 @@ static void test_metal_kernel_group(void) {
     test_metal_compressor_ratio4_replay_pack_exact();
     test_metal_compressor_ratio4_direct_pool_exact();
     test_metal_inplace_rope_pair_exact();
+    test_metal_fp8_kv_tail();
     test_metal_contiguous_f32_f16_roundtrip_exact();
     test_metal_gathered_kv_stage_exact();
     test_metal_contiguous_compressed_f16_attention_exact();
