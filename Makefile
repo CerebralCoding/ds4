@@ -18,11 +18,29 @@ QUALITY_CFLAGS ?= -O3 $(DEBUG_FLAGS) $(NATIVE_CPU_FLAG) -Wall -Wextra -std=c11
 
 LDLIBS ?= -lm -pthread
 METAL_SRCS := $(wildcard metal/*.metal)
+LLGUIDANCE ?= 0
+LLGUIDANCE_DIR ?= .deps/llguidance
+LLGUIDANCE_REPO ?= git@github.com:guidance-ai/llguidance.git
+LLGUIDANCE_TAG ?= v1.7.5
+SERVER_EXTRA_OBJS := ds4_llguidance.o
 ROCM_SRCS := $(wildcard rocm/*.cuh)
 DS4_TEST_MODEL ?= ds4flash.gguf
 DS4_TEST_MTP ?= gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf
 DS4_DSPARK_MODEL ?= $(DS4_TEST_MODEL)
 DS4_DSPARK_SUPPORT ?= gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf
+
+ifeq ($(LLGUIDANCE),1)
+ifeq ($(LLGUIDANCE_DIR),.deps/llguidance)
+LLGUIDANCE_NEEDS_CLONE := 1
+endif
+LLGUIDANCE_LIB := $(LLGUIDANCE_DIR)/target/release/libllguidance.a
+LLGUIDANCE_LDLIBS := $(LLGUIDANCE_LIB)
+ifneq ($(UNAME_S),Darwin)
+LLGUIDANCE_LDLIBS += -ldl
+endif
+LLGUIDANCE_CFLAGS := -DDS4_USE_LLGUIDANCE -I$(LLGUIDANCE_DIR)/parser
+DS4_LLGUIDANCE_DEPS := $(LLGUIDANCE_LIB)
+endif
 
 ifeq ($(UNAME_S),Darwin)
 METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
@@ -69,7 +87,7 @@ DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test test-rocm test-glm53-kda-rocm test-metal-session-batch test-mxfp4-cuda test-mxfp4-rocm test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm
+.PHONY: all help clean distclean test test-rocm test-glm53-kda-rocm test-metal-session-batch test-mxfp4-cuda test-mxfp4-rocm test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm
 
 ifeq ($(UNAME_S),Darwin)
 .PHONY: metal-decode-schedule-bench metal-prefill-variant-bench session-concurrency-bench check-mxfp4-half-lut
@@ -80,6 +98,7 @@ all: ds4 ds4-server ds4-bench ds4-eval ds4-agent
 help:
 	@echo "DS4 build targets:"
 	@echo "  make              Build Metal ./ds4, ./ds4-server, ./ds4-bench, ./ds4-eval, and ./ds4-agent"
+	@echo "  make LLGUIDANCE=1 Build with structured-output constrained decoding"
 	@echo "  make cpu          Build CPU-only ./ds4, ./ds4-server, ./ds4-bench, ./ds4-eval, and ./ds4-agent"
 	@echo "  make test         Build and run tests"
 	@echo "  make metal-decode-schedule-bench  Build the balanced Metal decode schedule benchmark"
@@ -97,8 +116,8 @@ help:
 ds4: ds4_cli.o ds4_help.o ds4_prompt_prefix.o linenoise.o ds4_gpu_args.o $(CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ ds4_cli.o ds4_help.o ds4_prompt_prefix.o linenoise.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
 
-ds4-server: ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(CORE_OBJS)
-	$(CC) $(CFLAGS) -o $@ ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
+ds4-server: ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(SERVER_EXTRA_OBJS) $(CORE_OBJS) $(DS4_LLGUIDANCE_DEPS)
+	$(CC) $(CFLAGS) -o $@ ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(SERVER_EXTRA_OBJS) $(CORE_OBJS) $(LLGUIDANCE_LDLIBS) $(METAL_LDLIBS)
 
 ds4-bench: ds4_bench.o ds4_help.o ds4_gpu_args.o $(CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ ds4_bench.o ds4_help.o ds4_gpu_args.o $(CORE_OBJS) $(METAL_LDLIBS)
@@ -283,9 +302,9 @@ tests/test_metal_dense_mpp: tests/test_metal_dense_mpp.o $(CORE_OBJS)
 test-metal-dense-mpp: tests/test_metal_dense_mpp
 	./tests/test_metal_dense_mpp
 
-cpu: ds4_cli_cpu.o ds4_server_cpu.o ds4_bench_cpu.o ds4_eval_cpu.o ds4_eval_cases.o ds4_agent_cpu.o ds4_help.o ds4_prompt_prefix.o ds4_web.o ds4_kvstore.o linenoise.o rax.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS)
+cpu: ds4_cli_cpu.o ds4_server_cpu.o ds4_bench_cpu.o ds4_eval_cpu.o ds4_eval_cases.o ds4_agent_cpu.o ds4_help.o ds4_prompt_prefix.o ds4_web.o ds4_kvstore.o linenoise.o rax.o ds4_gpu_args_cpu.o $(SERVER_EXTRA_OBJS) $(CPU_CORE_OBJS) $(DS4_LLGUIDANCE_DEPS)
 	$(CC) $(CFLAGS) -o ds4 ds4_cli_cpu.o ds4_help.o ds4_prompt_prefix.o linenoise.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
-	$(CC) $(CFLAGS) -o ds4-server ds4_server_cpu.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
+	$(CC) $(CFLAGS) -o ds4-server ds4_server_cpu.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args_cpu.o $(SERVER_EXTRA_OBJS) $(CPU_CORE_OBJS) $(LLGUIDANCE_LDLIBS) $(LDLIBS)
 	$(CC) $(CFLAGS) -o ds4-bench ds4_bench_cpu.o ds4_help.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
 	$(CC) $(CFLAGS) -o ds4-eval ds4_eval_cpu.o ds4_eval_cases.o ds4_help.o $(CPU_CORE_OBJS) $(LDLIBS)
 	$(CC) $(CFLAGS) -o ds4-agent ds4_agent_cpu.o ds4_help.o ds4_prompt_prefix.o ds4_web.o ds4_kvstore.o linenoise.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
@@ -297,6 +316,7 @@ all: help
 
 help:
 	@echo "DS4 build targets:"
+	@echo "  make LLGUIDANCE=1 ...    Build with structured-output constrained decoding"
 	@echo "  make cuda-spark          Build CUDA for DGX Spark / GB10"
 	@echo "  make cuda-generic        Build CUDA for a generic local CUDA GPU"
 	@echo "  make cuda CUDA_ARCH=sm_N Build CUDA with an explicit nvcc -arch value"
@@ -356,19 +376,19 @@ test-rocm:
 	./tests/test_prompt_prefix
 
 ds4: ds4_cli.o ds4_help.o ds4_prompt_prefix.o linenoise.o ds4_gpu_args.o $(CORE_OBJS)
-	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
+	$(DS4_LINK) -o $@ $(filter-out $(LLGUIDANCE_CONFIG),$^) $(DS4_LINK_LIBS)
 
-ds4-server: ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(CORE_OBJS)
-	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
+ds4-server: ds4_server.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args.o $(SERVER_EXTRA_OBJS) $(CORE_OBJS) $(DS4_LLGUIDANCE_DEPS)
+	$(DS4_LINK) -o $@ $(filter-out $(LLGUIDANCE_CONFIG) $(LLGUIDANCE_LIB),$^) $(LLGUIDANCE_LDLIBS) $(DS4_LINK_LIBS)
 
 ds4-bench: ds4_bench.o ds4_help.o ds4_gpu_args.o $(CORE_OBJS)
-	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
+	$(DS4_LINK) -o $@ $(filter-out $(LLGUIDANCE_CONFIG),$^) $(DS4_LINK_LIBS)
 
 ds4-eval: ds4_eval.o ds4_eval_cases.o ds4_help.o $(CORE_OBJS)
-	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
+	$(DS4_LINK) -o $@ $(filter-out $(LLGUIDANCE_CONFIG),$^) $(DS4_LINK_LIBS)
 
 ds4-agent: ds4_agent.o ds4_help.o ds4_prompt_prefix.o ds4_web.o ds4_kvstore.o linenoise.o ds4_gpu_args.o $(CORE_OBJS)
-	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
+	$(DS4_LINK) -o $@ $(filter-out $(LLGUIDANCE_CONFIG),$^) $(DS4_LINK_LIBS)
 
 gguf-tools/quality-testing/score_official.o: gguf-tools/quality-testing/score_official.c ds4.h
 	$(CC) $(filter-out -ffast-math,$(QUALITY_CFLAGS)) $(ROCM_HOST_CFLAGS) -I. -c -o $@ $<
@@ -466,9 +486,9 @@ tests/test_cuda_dspark_moe: tests/test_cuda_dspark_moe.o $(CORE_OBJS)
 test-cuda-dspark-moe: tests/test_cuda_dspark_moe
 	./tests/test_cuda_dspark_moe
 
-cpu: ds4_cli_cpu.o ds4_server_cpu.o ds4_bench_cpu.o ds4_eval_cpu.o ds4_eval_cases.o ds4_agent_cpu.o ds4_help.o ds4_prompt_prefix.o ds4_web.o ds4_kvstore.o linenoise.o rax.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS)
+cpu: ds4_cli_cpu.o ds4_server_cpu.o ds4_bench_cpu.o ds4_eval_cpu.o ds4_eval_cases.o ds4_agent_cpu.o ds4_help.o ds4_prompt_prefix.o ds4_web.o ds4_kvstore.o linenoise.o rax.o ds4_gpu_args_cpu.o $(SERVER_EXTRA_OBJS) $(CPU_CORE_OBJS) $(DS4_LLGUIDANCE_DEPS)
 	$(CC) $(CFLAGS) -o ds4 ds4_cli_cpu.o ds4_help.o ds4_prompt_prefix.o linenoise.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
-	$(CC) $(CFLAGS) -o ds4-server ds4_server_cpu.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
+	$(CC) $(CFLAGS) -o ds4-server ds4_server_cpu.o ds4_help.o ds4_kvstore.o rax.o ds4_gpu_args_cpu.o $(SERVER_EXTRA_OBJS) $(CPU_CORE_OBJS) $(LLGUIDANCE_LDLIBS) $(LDLIBS)
 	$(CC) $(CFLAGS) -o ds4-bench ds4_bench_cpu.o ds4_help.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
 	$(CC) $(CFLAGS) -o ds4-eval ds4_eval_cpu.o ds4_eval_cases.o ds4_help.o $(CPU_CORE_OBJS) $(LDLIBS)
 	$(CC) $(CFLAGS) -o ds4-agent ds4_agent_cpu.o ds4_help.o ds4_prompt_prefix.o ds4_web.o ds4_kvstore.o linenoise.o ds4_gpu_args_cpu.o $(CPU_CORE_OBJS) $(LDLIBS)
@@ -533,8 +553,11 @@ ds4_prompt_prefix.o: ds4_prompt_prefix.c ds4_prompt_prefix.h ds4.h
 ds4_gpu_args.o: ds4_gpu_args.c ds4_gpu_args.h ds4_gpu_mgpu.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_gpu_args.c
 
-ds4_server.o: ds4_server.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h
+ds4_server.o: ds4_server.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h ds4_llguidance.h rax.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_server.c
+
+ds4_llguidance.o: ds4_llguidance.c ds4_llguidance.h ds4.h $(DS4_LLGUIDANCE_DEPS)
+	$(CC) $(CFLAGS) $(LLGUIDANCE_CFLAGS) -c -o $@ ds4_llguidance.c
 
 ds4_bench.o: ds4_bench.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_bench.c
@@ -554,7 +577,7 @@ ds4_web.o: ds4_web.c ds4_web.h
 ds4_kvstore.o: ds4_kvstore.c ds4_kvstore.h ds4.h ds4_ssd.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_kvstore.c
 
-ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h ds4_image.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h
+ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h ds4_image.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h ds4_llguidance.h rax.h
 	$(CC) $(CFLAGS) -Wno-unused-function -c -o $@ tests/ds4_test.c
 
 ds4_agent_test.o: tests/ds4_agent_test.c ds4_agent.c ds4.h ds4_ssd.h ds4_distributed.h ds4_tp.h ds4_help.h ds4_prompt_prefix.h ds4_kvstore.h ds4_web.h linenoise.h
@@ -578,7 +601,7 @@ ds4_cli_cpu.o: ds4_cli.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_prompt
 ds4_gpu_args_cpu.o: ds4_gpu_args.c ds4_gpu_args.h ds4_gpu_mgpu.h
 	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4_gpu_args.c
 
-ds4_server_cpu.o: ds4_server.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h
+ds4_server_cpu.o: ds4_server.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h ds4_llguidance.h rax.h
 	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4_server.c
 
 ds4_bench_cpu.o: ds4_bench.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h
@@ -848,6 +871,17 @@ ds4_rocm_unavailable.o: ds4_rocm_unavailable.cu
 tests/cuda_long_context_smoke: tests/cuda_long_context_smoke.o ds4_cuda.o ds4_image.o $(MMQ_OBJS)
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
 
+ifeq ($(LLGUIDANCE),1)
+ifeq ($(LLGUIDANCE_NEEDS_CLONE),1)
+$(LLGUIDANCE_DIR):
+	mkdir -p .deps
+	git clone --depth 1 --branch $(LLGUIDANCE_TAG) $(LLGUIDANCE_REPO) $(LLGUIDANCE_DIR)
+endif
+
+$(LLGUIDANCE_LIB): | $(LLGUIDANCE_DIR)
+	cargo build --release --package llguidance --manifest-path $(LLGUIDANCE_DIR)/Cargo.toml
+endif
+
 tests/test_layer_pack.o: tests/test_layer_pack.c ds4_layer_pack.h
 	$(CC) $(CFLAGS) -I. -c -o $@ $<
 
@@ -981,11 +1015,11 @@ test-cuda-mixed-batch: tests/test_cuda_mixed_batch
 	DS4_TEST_MODEL="$(DS4_TEST_MODEL)" ./tests/test_cuda_mixed_batch
 endif
 
-ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(CORE_OBJS)
+ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(SERVER_EXTRA_OBJS) $(CORE_OBJS) $(DS4_LLGUIDANCE_DEPS)
 ifeq ($(UNAME_S),Darwin)
-	$(CC) $(CFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(CORE_OBJS) $(METAL_LDLIBS)
+	$(CC) $(CFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(SERVER_EXTRA_OBJS) $(CORE_OBJS) $(LLGUIDANCE_LDLIBS) $(METAL_LDLIBS)
 else
-	$(DS4_LINK) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(CORE_OBJS) $(DS4_LINK_LIBS)
+	$(DS4_LINK) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(SERVER_EXTRA_OBJS) $(CORE_OBJS) $(LLGUIDANCE_LDLIBS) $(DS4_LINK_LIBS)
 endif
 
 ds4_agent_test: ds4_agent_test.o ds4_help.o ds4_prompt_prefix.o ds4_web.o ds4_kvstore.o linenoise.o $(CORE_OBJS)
@@ -1002,7 +1036,7 @@ tests/test_prompt_prefix: tests/test_prompt_prefix.o ds4_prompt_prefix.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 .PHONY: test-frontends
-test-frontends: ds4_test ds4_agent_test test-web-recovery
+test-frontends: ds4_test ds4_agent_test test-web-recovery test-llguidance
 	./ds4_test --server
 	./ds4_agent_test
 
@@ -1013,7 +1047,7 @@ test-web-recovery: tests/test_web_recovery
 tests/test_web_recovery: tests/test_web_recovery.c ds4_web.c ds4_web.h
 	$(CC) $(CFLAGS) -Wno-unused-function -o $@ tests/test_web_recovery.c
 
-test: ds4_test ds4_agent_test ds4-eval q4k-dot-test mxfp4-dot-test test-session-state test-linux-memory test-engram test-web-recovery \
+test: test-llguidance ds4_test ds4_agent_test ds4-eval q4k-dot-test mxfp4-dot-test test-session-state test-linux-memory test-engram test-web-recovery \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \
 	tests/test_deepseek4_vision_image tests/test_image_decode tests/test_prompt_prefix $(SAMPLING_TEST) ds4 ds4-server ds4-bench ds4-agent
 	./ds4-eval --validate-cases
@@ -1078,9 +1112,38 @@ ds4_test.o ds4_agent_test.o \
 ds4_cpu_test_hooks.o ds4_cuda_test_hooks.o tests/test_session_state.o \
 tests/test_session_state_gpu.o: ds4_tool_text.h
 
+# Only the adapter needs the llguidance preprocessor flags. A changed option
+# or checkout rebuilds it and relinks frontends, including when switching back
+# to a configuration used earlier. Unchanged settings leave timestamps alone.
+LLGUIDANCE_CONFIG := .llguidance-config
+LLGUIDANCE_CONFIG_VALUE := $(LLGUIDANCE)|$(abspath $(LLGUIDANCE_DIR))|$(LLGUIDANCE_TAG)
+# Phony only on a configuration change, so even same-second switches rebuild
+# correctly on make versions with coarse timestamp resolution.
+ifneq ($(shell cat $(LLGUIDANCE_CONFIG) 2>/dev/null),$(LLGUIDANCE_CONFIG_VALUE))
+.PHONY: $(LLGUIDANCE_CONFIG)
+endif
+
+$(LLGUIDANCE_CONFIG):
+	@printf '%s\n' '$(LLGUIDANCE_CONFIG_VALUE)' > $@.tmp
+	@mv $@.tmp $@
+
+ds4_llguidance.o tests/test_llguidance.o: $(LLGUIDANCE_CONFIG)
+ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_test ds4_agent_test: $(LLGUIDANCE_CONFIG)
+
+tests/test_llguidance.o: tests/test_llguidance.c ds4_llguidance.h ds4.h
+	$(CC) $(CFLAGS) $(LLGUIDANCE_CFLAGS) -I. -c -o $@ $<
+
+tests/test_llguidance: tests/test_llguidance.o ds4_llguidance.o $(DS4_LLGUIDANCE_DEPS) $(LLGUIDANCE_CONFIG)
+	$(CC) $(CFLAGS) -o $@ $(filter %.o,$^) $(LLGUIDANCE_LDLIBS) $(LDLIBS)
+
+.PHONY: test-llguidance
+test-llguidance: tests/test_llguidance
+	./tests/test_llguidance
+
 clean:
 	rm -f tests/test_metal_q2_decode_exact
 	rm -f tests/test_metal_q8_decode_shape
+	rm -f $(LLGUIDANCE_CONFIG) $(LLGUIDANCE_CONFIG).tmp tests/test_llguidance
 	rm -f tests/test_qwen4_ngrams
 	rm -f tests/test_qwen4_ngram_state
 	rm -f tests/test_web_recovery
@@ -1117,3 +1180,6 @@ clean:
 
 # The active tokenizer includes generated Unicode classes.
 ds4.o ds4_cpu.o ds4_cpu_test_hooks.o: ds4_qwen4_unicode.inc
+
+distclean: clean
+	rm -rf .deps

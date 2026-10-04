@@ -505,6 +505,80 @@ cleanup:
     test_restore_env("DS4_QWEN4_SPEC_FORCE_ACCEPT", saved_force);
 }
 
+static void test_structured_output_model(void) {
+    if (!ds4_llguidance_available()) {
+        fprintf(stderr, "ds4-test: structured-output skipped (LLGUIDANCE=1 required)\n");
+        return;
+    }
+    test_close_engines();
+    ds4_engine *engine = test_open_engine(false);
+    if (!engine) return;
+    ds4_llguidance_cache *cache = ds4_llguidance_cache_create(engine);
+    TEST_ASSERT(cache != NULL);
+    const struct {
+        const char *type, *constraint, *expected;
+    } cases[] = {
+        {"regex", "OK", "OK"},
+        {"lark", "start: \"OK\"", "OK"},
+        {"llguidance", "{\"grammars\":[{\"lark_grammar\":\"start: \\\"OK\\\"\"}]}", "OK"},
+        {"json_schema", "{\"const\":{\"ok\":true}}", "{\"ok\":true}"},
+    };
+    for (size_t i = 0; cache && i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char err[256] = {0};
+        ds4_llguidance *grammar = ds4_llguidance_create(
+                cache, cases[i].type, cases[i].constraint, err, sizeof(err));
+        if (!grammar) fprintf(stderr, "ds4-test: %s: %s\n", cases[i].type, err);
+        TEST_ASSERT(grammar != NULL);
+        if (!grammar) continue;
+        ds4_session *session = NULL;
+        ds4_tokens prompt = {0};
+        TEST_ASSERT(ds4_session_create(&session, engine, 512) == 0);
+        ds4_encode_chat_prompt(engine, NULL, "Reply with the word WRONG.",
+                               DS4_THINK_NONE, &prompt);
+        buf output = {0};
+        bool stopped = false;
+        uint64_t rng = 12345;
+        if (session && ds4_session_sync(session, &prompt, err, sizeof(err)) == 0) {
+            for (int n = 0; n < 64; n++) {
+                int token = ds4_llguidance_sample(grammar, session,
+                        i % 2 ? 0.8f : 0.0f, 0, 1.0f, 0.0f, &rng, err, sizeof(err));
+                TEST_ASSERT(token >= 0);
+                if (token < 0) break;
+                if (token == ds4_token_eos(engine)) {
+                    stopped = true;
+                    break;
+                }
+                bool accepted = ds4_llguidance_accept(grammar, engine, token, err, sizeof(err));
+                TEST_ASSERT(accepted);
+                if (!accepted) break;
+                size_t len = 0;
+                char *piece = ds4_token_text(engine, token, &len);
+                TEST_ASSERT(piece != NULL);
+                for (size_t j = 0; piece && j < len; j++) {
+                    if (!isspace((unsigned char)piece[j])) buf_append(&output, piece + j, 1);
+                }
+                free(piece);
+                int rc = ds4_session_eval(session, token, err, sizeof(err));
+                TEST_ASSERT(rc == 0);
+                if (rc) break;
+            }
+        } else {
+            TEST_ASSERT(false);
+        }
+        char *text = buf_take(&output);
+        fprintf(stderr, "ds4-test: structured %s output=%s stopped=%d error=%s\n",
+                cases[i].type, text, stopped, err);
+        TEST_ASSERT(stopped);
+        TEST_ASSERT(!strcmp(text, cases[i].expected));
+        free(text);
+        ds4_tokens_free(&prompt);
+        ds4_session_free(session);
+        ds4_llguidance_free(grammar);
+    }
+    ds4_llguidance_cache_free(cache);
+    ds4_engine_close(engine);
+}
+
 static void test_session_snapshot_roundtrip(void) {
     ds4_engine *engine = test_get_engine(false);
     if (!engine) return;
@@ -7604,6 +7678,7 @@ static const ds4_test_entry test_entries[] = {
     {"--streaming-decode-prefill-correctness", "streaming-decode-prefill-correctness", "streaming decode-style cold prefill drift and repeatability", test_streaming_decode_prefill_correctness},
     {"--mtp-verify-depth", "mtp-verify-depth", "MTP speculative verify commits autoregressive-identical tokens at draft depth > 2", test_mtp_verify_depth},
     {"--dspark-verify-depth", "dspark-verify-depth", "DSpark speculative verify commits autoregressive-identical tokens at draft depth > 2", test_dspark_verify_depth},
+    {"--structured-output", "structured-output", "model decoding obeys regex, grammar, and JSON constraints", test_structured_output_model},
 #endif
     {"--server", "server", "server parser/rendering/cache unit tests", test_server_unit_group},
 };
