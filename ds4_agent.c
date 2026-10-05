@@ -638,6 +638,7 @@ static bool agent_slash_command_known(const char *cmd) {
            !strcmp(cmd, "/new") ||
            agent_slash_command_with_args(cmd, "/power") ||
            agent_slash_command_with_args(cmd, "/think") ||
+           !strcmp(cmd, "/nothink") ||
            agent_slash_command_with_args(cmd, "/steer") ||
            agent_slash_command_with_args(cmd, "/hints") ||
            agent_slash_command_with_args(cmd, "/switch") ||
@@ -11067,8 +11068,20 @@ static void worker_request_power(agent_worker *w, int power) {
     pthread_mutex_unlock(&w->mu);
 }
 
-static void agent_numeric_think_prefix(ds4_engine *engine, ds4_think_mode mode,
-                                       ds4_tokens *prefix) {
+static bool agent_parse_think(const char *arg, bool numeric, ds4_think_mode *mode) {
+    if (!arg[0] || !strcmp(arg, "on")) {
+        *mode = DS4_THINK_HIGH;
+        return true;
+    }
+    if (!strcmp(arg, "off")) {
+        *mode = DS4_THINK_NONE;
+        return true;
+    }
+    return numeric && ds4_think_mode_parse_level(arg, mode);
+}
+
+static void agent_think_prefix(ds4_engine *engine, ds4_think_mode mode,
+                               ds4_tokens *prefix) {
     ds4_chat_begin(engine, prefix);
     ds4_chat_append_think_prefix(engine, prefix, mode);
     ds4_chat_append_message(engine, prefix, "system", "");
@@ -11079,25 +11092,29 @@ static void worker_apply_requested_think(agent_worker *w) {
     const ds4_think_mode mode = w->requested_think;
     w->think_requested = false;
     pthread_mutex_unlock(&w->mu);
-    if (!ds4_engine_is_deepseek41(w->engine) || w->cfg->gen.raw_prompt) {
-        agent_publishf(w, "\n/think requires a V4.1 chat session\n");
+    if (w->cfg->gen.raw_prompt || ds4_engine_is_glm_dsa(w->engine) ||
+        ds4_engine_is_qwen4(w->engine)) {
+        agent_publishf(w, "\n/think requires a DeepSeek chat session\n");
         return;
     }
     /* Restored sessions may have a different effort from the current CLI
      * setting. Match their actual token prefix, not the current preference. */
     int old_len = 0;
-    for (int level = 0; level <= 100; level++) {
+    const bool numeric = ds4_engine_is_deepseek41(w->engine);
+    const ds4_think_mode modes[] = {DS4_THINK_NONE, DS4_THINK_HIGH, DS4_THINK_MAX};
+    for (int level = 0; level < (numeric ? 101 : 3); level++) {
         ds4_tokens candidate = {0};
-        agent_numeric_think_prefix(w->engine,
-            (ds4_think_mode)(DS4_THINK_LEVEL_BASE + level), &candidate);
+        agent_think_prefix(w->engine, numeric ?
+            (ds4_think_mode)(DS4_THINK_LEVEL_BASE + level) : modes[level], &candidate);
         if (candidate.len > old_len && ds4_tokens_starts_with(&w->transcript, &candidate))
             old_len = candidate.len;
         ds4_tokens_free(&candidate);
     }
     ds4_tokens next = {0};
-    agent_numeric_think_prefix(w->engine, mode, &next);
+    agent_think_prefix(w->engine, mode, &next);
     const int delta = next.len - old_len;
-    if (!old_len || (int64_t)w->transcript.len + delta >= agent_worker_effective_ctx_size(w)) {
+    if (!old_len || (delta > 0 &&
+        (int64_t)w->transcript.len + delta >= agent_worker_effective_ctx_size(w))) {
         agent_publishf(w, "\ncannot change thinking prefix: incompatible session or no context room\n");
         ds4_tokens_free(&next);
         return;
@@ -12698,6 +12715,9 @@ static void runtime_help(void) {
     puts("  /strip SHA   Strip KV payload; /switch rebuilds it by prefill.");
     puts("  /history [N] Show N recent user turns from the current session.");
     puts("  /power N     Set GPU duty cycle percentage, 1..100.");
+    puts("  /think [on|off] Enable or disable DeepSeek thinking after this turn (default: on).");
+    puts("  /think N     V4.1: set reasoning effort 0..100 (0 disables thinking).");
+    puts("  /nothink     Disable thinking; same as /think off.");
     puts("  /hints on|off Enable or disable brief programming hints; starts off.");
     puts("  /steer [F]   Show or set FFN steering for subsequent tokens.");
     puts("  /new         Start a fresh session from the system prompt.");
@@ -13378,13 +13398,14 @@ static int run_agent(ds4_engine *engine, agent_config *cfg) {
                             worker_request_power(&worker, power);
                         }
                     }
-                } else if (agent_slash_command_with_args(cmd, "/think")) {
-                    char *arg = cmd + strlen("/think");
+                } else if (agent_slash_command_with_args(cmd, "/think") ||
+                           !strcmp(cmd, "/nothink")) {
+                    const char *arg = !strcmp(cmd, "/nothink") ? "off" :
+                                      cmd + strlen("/think");
                     while (*arg == ' ' || *arg == '\t') arg++;
                     ds4_think_mode mode = DS4_THINK_HIGH;
-                    if (!ds4_engine_is_deepseek41(worker.engine) ||
-                        (arg[0] && !ds4_think_mode_parse_level(arg, &mode))) {
-                        printf("usage: /think [0..100] (V4.1 only)\n");
+                    if (!agent_parse_think(arg, ds4_engine_is_deepseek41(worker.engine), &mode)) {
+                        printf("usage: /think [on|off] or /nothink; V4.1 also accepts /think [0..100]\n");
                     } else {
                         pthread_mutex_lock(&worker.mu);
                         worker.requested_think = mode;

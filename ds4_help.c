@@ -343,7 +343,8 @@ static void print_agent_sessions(FILE *fp, const help_colors *c) {
     opt(fp, c, "/strip ID", "Remove KV payload; the text history can be rebuilt later.");
     opt(fp, c, "/history [N]", "Show N recent user turns from the current session.");
     opt(fp, c, "/hints on|off", "Enable or disable brief programming hints. New and resumed sessions start off.");
-    opt(fp, c, "/think [N]", "V4.1: set effort 0..100 (default 75) after this turn; rebuilds the prefix.");
+    opt(fp, c, "/think [on|off], /nothink", "Enable or disable DeepSeek thinking after this turn. /think alone enables it.");
+    opt(fp, c, "/think N", "V4.1: set effort 0..100 (default 75); rebuilds the prefix. 0 disables thinking.");
     opt(fp, c, "/power N", "Set GPU duty cycle percentage, 1..100.");
     opt(fp, c, "/new", "Start a fresh session from the system prompt.");
     opt(fp, c, "/quit, /exit", "Exit.");

@@ -902,6 +902,104 @@ static void test_compaction_boundaries(void) {
     AGENT_TEST_ASSERT(agent_compact_image_boundary(NULL, 0, false, 77) == 77);
 }
 
+static void test_think_commands(void) {
+    for (int numeric = 0; numeric <= 1; numeric++) {
+        ds4_think_mode mode = DS4_THINK_NONE;
+        AGENT_TEST_ASSERT(agent_parse_think("", numeric, &mode) && mode == DS4_THINK_HIGH);
+        AGENT_TEST_ASSERT(agent_parse_think("off", numeric, &mode) && mode == DS4_THINK_NONE);
+        AGENT_TEST_ASSERT(agent_parse_think("on", numeric, &mode) && mode == DS4_THINK_HIGH);
+        AGENT_TEST_ASSERT(!agent_parse_think("invalid", numeric, &mode));
+        AGENT_TEST_ASSERT(!agent_parse_think("101", numeric, &mode));
+        AGENT_TEST_ASSERT(agent_parse_think("0", numeric, &mode) == (bool)numeric);
+        if (numeric) AGENT_TEST_ASSERT(!ds4_think_mode_enabled(mode));
+        AGENT_TEST_ASSERT(agent_parse_think("75", numeric, &mode) == (bool)numeric);
+        if (numeric) AGENT_TEST_ASSERT(ds4_think_mode_level(mode) == 75);
+    }
+    AGENT_TEST_ASSERT(agent_slash_command_known("/think off"));
+    AGENT_TEST_ASSERT(agent_slash_command_known("/think on"));
+    AGENT_TEST_ASSERT(agent_slash_command_known("/nothink"));
+    AGENT_TEST_ASSERT(!agent_slash_command_known("/nothinking"));
+    AGENT_TEST_ASSERT(!agent_slash_command_known("/nothink extra"));
+}
+
+static int test_flash_thinking(const char *model) {
+    ds4_engine_options opt = {.model_path = model, .backend = DS4_BACKEND_METAL,
+        .context_size = 512, .power_percent = 100};
+    agent_config cfg = {.gen = {.ctx_size = 512, .think_mode = DS4_THINK_HIGH}};
+    agent_worker w = {.cfg = &cfg, .initialized = true,
+        .wake_fd = {-1, -1}, .status = {.state = AGENT_WORKER_IDLE}};
+    pthread_mutex_init(&w.mu, NULL);
+    AGENT_TEST_ASSERT(ds4_engine_open(&w.engine, &opt) == 0);
+    if (!w.engine) return 1;
+    AGENT_TEST_ASSERT(!ds4_engine_is_deepseek41(w.engine) &&
+                      !ds4_engine_is_glm_dsa(w.engine) && !ds4_engine_is_qwen4(w.engine));
+    AGENT_TEST_ASSERT(ds4_session_create(&w.session, w.engine, 512) == 0);
+    if (!w.session) { ds4_engine_close(w.engine); return 1; }
+
+    agent_think_prefix(w.engine, DS4_THINK_HIGH, &w.transcript);
+    const int prefix_len = w.transcript.len;
+    ds4_tokens suffix = {0};
+    ds4_tokenize_text(w.engine, "System text.\n\n", &suffix);
+    ds4_chat_append_message(w.engine, &suffix, "user", "Remember the code: 4829.");
+    ds4_chat_append_message(w.engine, &suffix, "assistant", "The code is 4829.");
+    for (int i = 0; i < suffix.len; i++) ds4_tokens_push(&w.transcript, suffix.v[i]);
+    ds4_tokens original = {0};
+    ds4_tokens_copy(&original, &w.transcript);
+    char err[160] = {0};
+    AGENT_TEST_ASSERT(ds4_session_sync(w.session, &w.transcript, err, sizeof(err)) == 0);
+    const int cached = ds4_session_pos(w.session);
+    const char *commands[] = {"off", "on", "off", ""};
+    for (size_t i = 0; i < sizeof(commands) / sizeof(*commands); i++) {
+        AGENT_TEST_ASSERT(agent_parse_think(commands[i], false, &w.requested_think));
+        w.think_requested = true;
+        AGENT_TEST_ASSERT(!worker_is_idle(&w) && !worker_submit(&w, "must wait"));
+        worker_apply_requested_think(&w);
+        AGENT_TEST_ASSERT(worker_is_idle(&w));
+        AGENT_TEST_ASSERT(cfg.gen.think_mode == w.requested_think);
+        AGENT_TEST_ASSERT(w.transcript.len == original.len &&
+                          ds4_tokens_starts_with(&w.transcript, &original));
+        AGENT_TEST_ASSERT(ds4_session_pos(w.session) == cached &&
+                          ds4_session_common_prefix(w.session, &w.transcript) == cached);
+        ds4_tokens next = {0};
+        ds4_chat_append_assistant_prefix(w.engine, &next, effective_think_mode(&cfg));
+        int marker = agent_special_token_id(w.engine,
+            ds4_think_mode_enabled(w.requested_think) ? "<think>" : "</think>");
+        AGENT_TEST_ASSERT(next.len > 0 && next.v[next.len - 1] == marker);
+        ds4_tokens_free(&next);
+    }
+    /* A restored max-effort session must lose its instruction when disabled. */
+    ds4_tokens_free(&w.transcript);
+    agent_think_prefix(w.engine, DS4_THINK_MAX, &w.transcript);
+    for (int i = 0; i < suffix.len; i++) ds4_tokens_push(&w.transcript, suffix.v[i]);
+    AGENT_TEST_ASSERT(w.transcript.len > original.len);
+    AGENT_TEST_ASSERT(ds4_session_sync(w.session, &w.transcript, err, sizeof(err)) == 0);
+    w.requested_think = DS4_THINK_NONE;
+    w.think_requested = true;
+    worker_apply_requested_think(&w);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == DS4_THINK_NONE && w.session_dirty);
+    AGENT_TEST_ASSERT(ds4_session_pos(w.session) == 0);
+    AGENT_TEST_ASSERT(w.transcript.len == prefix_len + suffix.len &&
+                      ds4_tokens_starts_with(&w.transcript, &original));
+    while (w.transcript.len < cfg.gen.ctx_size)
+        ds4_tokens_push(&w.transcript, ds4_token_eos(w.engine));
+    w.requested_think = DS4_THINK_HIGH;
+    worker_apply_requested_think(&w);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == DS4_THINK_HIGH &&
+                      w.transcript.len == cfg.gen.ctx_size);
+    cfg.gen.raw_prompt = true;
+    w.requested_think = DS4_THINK_NONE;
+    worker_apply_requested_think(&w);
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == DS4_THINK_HIGH);
+    AGENT_TEST_ASSERT(strstr(w.out, "requires a DeepSeek chat session"));
+
+    free(w.out);
+    ds4_tokens_free(&original); ds4_tokens_free(&suffix); ds4_tokens_free(&w.transcript);
+    ds4_session_free(w.session); ds4_engine_close(w.engine);
+    pthread_mutex_destroy(&w.mu);
+    puts("Flash agent thinking toggle, conversation and KV preservation: done");
+    return agent_test_failures ? 1 : 0;
+}
+
 static int test_v41_thinking(const char *model) {
     ds4_engine_options opt = {.model_path = model, .backend = DS4_BACKEND_METAL,
         .ssd_streaming = true, .ssd_streaming_cache_experts = 512,
@@ -915,7 +1013,7 @@ static int test_v41_thinking(const char *model) {
     AGENT_TEST_ASSERT(ds4_session_create(&w.session, w.engine, 256) == 0);
     if (!w.session) { ds4_engine_close(w.engine); return 1; }
     /* Simulate a restored session whose effort differs from the CLI default. */
-    agent_numeric_think_prefix(w.engine, DS4_THINK_MAX, &w.transcript);
+    agent_think_prefix(w.engine, DS4_THINK_MAX, &w.transcript);
     ds4_tokens suffix = {0};
     ds4_tokenize_text(w.engine, "System text.\n\n", &suffix);
     ds4_chat_append_message(w.engine, &suffix, "user", "Hello");
@@ -939,7 +1037,7 @@ static int test_v41_thinking(const char *model) {
         AGENT_TEST_ASSERT(worker_is_idle(&w));
         AGENT_TEST_ASSERT(ds4_session_pos(w.session) == (changed ? 0 : before));
         ds4_tokens expected = {0};
-        agent_numeric_think_prefix(w.engine, w.requested_think, &expected);
+        agent_think_prefix(w.engine, w.requested_think, &expected);
         AGENT_TEST_ASSERT(w.images[0].token_start == (uint32_t)expected.len);
         for (int j = 0; j < suffix.len; j++) ds4_tokens_push(&expected, suffix.v[j]);
         AGENT_TEST_ASSERT(w.transcript.len == expected.len &&
@@ -950,7 +1048,7 @@ static int test_v41_thinking(const char *model) {
     w.requested_think = DS4_THINK_MAX;
     worker_apply_requested_think(&w);
     AGENT_TEST_ASSERT(ds4_think_mode_level(cfg.gen.think_mode) == 0);
-    AGENT_TEST_ASSERT(strstr(w.out, "requires a V4.1 chat session"));
+    AGENT_TEST_ASSERT(strstr(w.out, "requires a DeepSeek chat session"));
     cfg.gen.raw_prompt = false;
     while (w.transcript.len < 250) ds4_tokens_push(&w.transcript, ds4_token_eos(w.engine));
     worker_apply_requested_think(&w);
@@ -1114,6 +1212,7 @@ static int test_full_context_save(const char *model) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--flash-think-toggle")) return test_flash_thinking(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--full-context-save")) return test_full_context_save(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--think-fixture")) return test_v41_thinking(argv[2]);
     if (argc == 2 && !strcmp(argv[1], "--terminal-driver")) return test_terminal_driver();
@@ -1125,6 +1224,7 @@ int main(int argc, char **argv) {
     AGENT_TEST_ASSERT(cfg.engine.model_path && !strcmp(cfg.engine.model_path, "qwen.gguf"));
     test_agent_cli();
     test_agent_runtime();
+    test_think_commands();
     ds4_agent_unit_tests_run();
     test_v41_tool_syntax();
     test_qwen_tool_syntax();
