@@ -35,6 +35,7 @@
 #include <unistd.h>
 #ifdef __APPLE__
 #include <copyfile.h>
+#include <mach-o/dyld.h>
 #elif defined(__linux__)
 #include <sys/xattr.h>
 #endif
@@ -89,6 +90,7 @@ typedef struct {
     const char *gpu_vram_arg;
     const char *gpu_devices_arg;
     const char *chdir_path;
+    char *model_path_owned;
     bool non_interactive;
     bool edit_upto;
 } agent_config;
@@ -709,10 +711,56 @@ static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
     return argv[++(*i)];
 }
 
+static char *agent_runtime_directory(const char *executable) {
+    char *dir = realpath(executable, NULL);
+    if (!dir) return NULL;
+    char *slash = strrchr(dir, '/');
+    if (!slash) { free(dir); return NULL; }
+    slash[1] = '\0';
+    char *installed = ds4_kvstore_path_join(dir, "../share/ds4");
+    struct stat st;
+    if (stat(installed, &st) == 0 && S_ISDIR(st.st_mode)) {
+        free(dir);
+        dir = realpath(installed, NULL);
+    }
+    free(installed);
+    return dir;
+}
+
+static char *agent_executable_path(void) {
+    char path[PATH_MAX];
+#ifdef __APPLE__
+    uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) != 0) return NULL;
+#elif defined(__linux__)
+    ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (n < 0 || (size_t)n == sizeof(path) - 1) return NULL;
+    path[n] = '\0';
+#else
+    return NULL;
+#endif
+    return realpath(path, NULL);
+}
+
+static void agent_configure_runtime(agent_config *cfg, const char *runtime) {
+    if (!cfg->engine.model_path) {
+        const char *model = getenv("DS4_MODEL");
+        cfg->model_path_owned = model && model[0] ? xstrdup(model) :
+            runtime ? ds4_kvstore_path_join(runtime, "ds4flash.gguf") :
+                      xstrdup("ds4flash.gguf");
+        cfg->engine.model_path = cfg->model_path_owned;
+    }
+    const char *metal = getenv("DS4_METAL_SOURCE_DIR");
+    if (runtime && (!metal || !metal[0])) {
+        char *dir = ds4_kvstore_path_join(runtime, "metal");
+        setenv("DS4_METAL_SOURCE_DIR", dir, 1);
+        free(dir);
+    }
+}
+
 static agent_config parse_options(int argc, char **argv) {
     agent_config c = {
         .engine = {
-            .model_path = "ds4flash.gguf",
             .backend = default_backend(),
             .mtp_draft_tokens = 1,
             .mtp_margin = 3.0f,
@@ -729,8 +777,27 @@ static agent_config parse_options(int argc, char **argv) {
     };
 
     bool steering_scale_set = false;
+    bool literal_prompt = false;
+    bool exec_mode = false;
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
+        if (!literal_prompt && !strcmp(arg, "--")) {
+            literal_prompt = true;
+            continue;
+        }
+        if (!literal_prompt && !c.gen.prompt && !exec_mode &&
+            (!strcmp(arg, "exec") || !strcmp(arg, "e"))) {
+            c.non_interactive = exec_mode = true;
+            continue;
+        }
+        if (literal_prompt || arg[0] != '-') {
+            if (c.gen.prompt) {
+                fprintf(stderr, "ds4-agent: specify only one initial prompt (quote prompts containing spaces)\n");
+                exit(2);
+            }
+            c.gen.prompt = arg;
+            continue;
+        }
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             const char *topic = (i + 1 < argc && argv[i + 1][0] != '-') ?
                 argv[i + 1] : NULL;
@@ -775,14 +842,14 @@ static agent_config parse_options(int argc, char **argv) {
         if (!strcmp(arg, "-p") || !strcmp(arg, "--prompt")) {
             if (c.gen.prompt) {
                 fprintf(stderr,
-                        "ds4-agent: specify only one of -p/--prompt and --prompt-file\n");
+                        "ds4-agent: specify only one initial prompt (positional, --prompt, or --prompt-file)\n");
                 exit(2);
             }
             c.gen.prompt = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--prompt-file")) {
             if (c.gen.prompt) {
                 fprintf(stderr,
-                        "ds4-agent: specify only one of -p/--prompt and --prompt-file\n");
+                        "ds4-agent: specify only one initial prompt (positional, --prompt, or --prompt-file)\n");
                 exit(2);
             }
             const char *path = need_arg(&i, argc, argv, arg);
@@ -901,7 +968,8 @@ static agent_config parse_options(int argc, char **argv) {
             c.engine.backend = DS4_BACKEND_CPU;
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int(need_arg(&i, argc, argv, arg), arg);
-        } else if (!strcmp(arg, "--chdir")) {
+        } else if (!strcmp(arg, "--chdir") || !strcmp(arg, "--cd") ||
+                   !strcmp(arg, "-C")) {
             c.chdir_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--quality")) {
             c.engine.quality = true;
@@ -968,6 +1036,10 @@ static agent_config parse_options(int argc, char **argv) {
         }
     }
 
+    if (exec_mode && (!c.gen.prompt || !c.gen.prompt[0])) {
+        fprintf(stderr, "ds4-agent: exec requires a prompt or --prompt-file FILE\n");
+        exit(2);
+    }
     if (c.engine.directional_steering_file && !steering_scale_set)
         c.engine.directional_steering_ffn = 1.0f;
     char tp_err[256];
@@ -13534,6 +13606,11 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
+    char *executable = agent_executable_path();
+    char *runtime = executable ? agent_runtime_directory(executable) : NULL;
+    agent_configure_runtime(&cfg, runtime);
+    free(runtime);
+    free(executable);
     cfg.engine.context_size = cfg.gen.ctx_size;
     cfg.engine.placement_ctx_hint = cfg.gen.ctx_size;
     if (cfg.gpu_vram_arg || cfg.gpu_devices_arg) {
@@ -13607,9 +13684,8 @@ int main(int argc, char **argv) {
     }
     agent_apply_model_sampling_defaults(engine, &cfg.gen);
 
-    /* Model paths and Metal kernel sources are resolved from the launch
-     * directory. Tools should run in --chdir, so change directory only after
-     * the inference engine has finished opening. */
+    /* Explicit relative asset paths belong to the launch directory; tools
+     * and session files belong to the selected project directory. */
     if (cfg.chdir_path && chdir(cfg.chdir_path) != 0) {
         fprintf(stderr, "ds4-agent: failed to chdir to %s: %s\n",
                 cfg.chdir_path, strerror(errno));
@@ -13636,6 +13712,7 @@ int main(int argc, char **argv) {
     ds4_engine_close(engine);
     ds4_tp_free(tp_leader);
     free(cfg.gen.prompt_owned);
+    free(cfg.model_path_owned);
     ds4_prompt_prefix_free(&cfg.gen.prefix);
     return rc;
 }

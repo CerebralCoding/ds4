@@ -118,7 +118,7 @@ static const char *tool_usage(ds4_help_tool tool) {
     case DS4_HELP_SERVER:
         return "Usage: ds4-server [options]";
     case DS4_HELP_AGENT:
-        return "Usage: ds4-agent [options]";
+        return "Usage: ds4 [exec] [PROMPT] [options]\n       ds4-agent [exec] [PROMPT] [options]";
     case DS4_HELP_BENCH:
         return "Usage: ds4-bench (--prompt-file FILE | --chat-prompt-file FILE) [options]";
     case DS4_HELP_EVAL:
@@ -146,7 +146,9 @@ static const char *tool_summary(ds4_help_tool tool) {
 static void print_model_runtime(FILE *fp, const help_colors *c,
                                 ds4_help_tool tool, bool full) {
     title(fp, c, "Model And Runtime");
-    opt(fp, c, "-m, --model FILE", "GGUF model path. Default: ds4flash.gguf");
+    opt(fp, c, "-m, --model FILE", tool == DS4_HELP_AGENT ?
+        "GGUF model path. Default: DS4_MODEL or the installed model link." :
+        "GGUF model path. Default: ds4flash.gguf");
     if (tool == DS4_HELP_DS4 || tool == DS4_HELP_AGENT || tool == DS4_HELP_SERVER) {
         opt(fp, c, "--vision FILE", "Vision encoder GGUF for the selected model.");
     }
@@ -315,6 +317,9 @@ static void print_cli_commands(FILE *fp, const help_colors *c) {
 
 static void print_agent_specific(FILE *fp, const help_colors *c) {
     title(fp, c, "Agent Options");
+    opt(fp, c, "[PROMPT]", "Start the interactive agent in the current folder, optionally with an initial task.");
+    opt(fp, c, "exec, e PROMPT", "Run one task without the interactive UI, then exit.");
+    opt(fp, c, "-- PROMPT", "Treat the prompt literally, including leading dashes or command names.");
     opt(fp, c, "-p, --prompt TEXT", "Submit an initial prompt after startup.");
     opt(fp, c, "--prompt-file FILE", "Read the initial prompt from FILE.");
     opt(fp, c, "--prefix-file FILE", "Preload complete alternating USER:/ASSISTANT: turns before the live task.");
@@ -323,7 +328,8 @@ static void print_agent_specific(FILE *fp, const help_colors *c) {
     opt(fp, c, "--edit-upto", "Enable anchored [upto] edits and automatic marker insertion.");
     opt(fp, c, "-sys, --system TEXT", "Extra system prompt. Empty disables extra text.");
     opt(fp, c, "--trace FILE", "Write prompt, token, and DSML debug trace.");
-    opt(fp, c, "--chdir DIR", "Change working directory before loading runtime assets.");
+    opt(fp, c, "-C, --cd, --chdir DIR", "Run agent tools in DIR. Explicit relative model and prompt paths use the launch folder.");
+    opt(fp, c, "DS4_MODEL", "Environment override for the default model; --model takes precedence.");
     fputc('\n', fp);
 }
 
@@ -514,8 +520,10 @@ static void print_examples(FILE *fp, const help_colors *c, ds4_help_tool tool, c
         opt(fp, c, "local API", "./ds4-server --ctx 100000 --kv-disk-dir ~/.ds4/server-kv --kv-disk-space-mb 8192");
         opt(fp, c, "curl", "curl http://127.0.0.1:8000/v1/models");
     } else if (tool == DS4_HELP_AGENT || topic_is(topic, "sessions") || topic_is(topic, "tools")) {
-        opt(fp, c, "interactive", "./ds4-agent");
-        opt(fp, c, "one shot", "./ds4-agent --non-interactive -p \"Create /tmp/hello.c\"");
+        opt(fp, c, "interactive", "ds4");
+        opt(fp, c, "initial task", "ds4 \"Explain this project\"");
+        opt(fp, c, "one shot", "ds4 exec \"Summarize README.md\"");
+        opt(fp, c, "project", "ds4 -C ~/project");
     } else if (tool == DS4_HELP_BENCH || topic_is(topic, "benchmark")) {
         opt(fp, c, "csv", "./ds4-bench --prompt-file long.txt --ctx-max 32768 --csv speed.csv");
         opt(fp, c, "prefill only", "./ds4-bench --prompt-file long.txt --gen-tokens 0");

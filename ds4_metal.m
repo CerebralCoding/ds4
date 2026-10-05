@@ -4797,8 +4797,13 @@ static NSString *ds4_gpu_full_source(void) {
         if (override_path && override_path[0]) {
             [paths addObject:[NSString stringWithUTF8String:override_path]];
         }
-        [paths addObject:spec[1]];
-        [paths addObject:[@"./" stringByAppendingString:spec[1]]];
+        const char *source_dir = getenv("DS4_METAL_SOURCE_DIR");
+        if (source_dir && source_dir[0]) {
+            [paths addObject:[[NSString stringWithUTF8String:source_dir]
+                stringByAppendingPathComponent:[spec[1] lastPathComponent]]];
+        } else {
+            [paths addObject:spec[1]];
+        }
 
         NSString *loaded = nil;
         NSString *loaded_path = nil;

@@ -8,6 +8,112 @@
 
 static const char *test_output_dir;
 
+static void test_agent_cli(void) {
+    char *bare[] = {"ds4"};
+    agent_config cfg = parse_options(1, bare);
+    AGENT_TEST_ASSERT(!cfg.non_interactive && !cfg.gen.prompt && !cfg.chdir_path);
+    char *interactive[] = {"ds4", "Explain this project", "-C", "project dir"};
+    cfg = parse_options(4, interactive);
+    AGENT_TEST_ASSERT(!cfg.non_interactive);
+    AGENT_TEST_ASSERT(!strcmp(cfg.gen.prompt, "Explain this project"));
+    AGENT_TEST_ASSERT(!strcmp(cfg.chdir_path, "project dir"));
+    char *once[] = {"ds4", "--cd", "project dir", "exec", "Summarize", "--nothink"};
+    cfg = parse_options(6, once);
+    AGENT_TEST_ASSERT(cfg.non_interactive && !strcmp(cfg.gen.prompt, "Summarize"));
+    AGENT_TEST_ASSERT(!strcmp(cfg.chdir_path, "project dir"));
+    AGENT_TEST_ASSERT(cfg.gen.think_mode == DS4_THINK_NONE);
+    char *literal[] = {"ds4", "e", "--", "--help"};
+    cfg = parse_options(4, literal);
+    AGENT_TEST_ASSERT(cfg.non_interactive && !strcmp(cfg.gen.prompt, "--help"));
+    char *reserved[] = {"ds4", "--", "exec"};
+    cfg = parse_options(3, reserved);
+    AGENT_TEST_ASSERT(!cfg.non_interactive && !strcmp(cfg.gen.prompt, "exec"));
+
+    char *invalid[][5] = {
+        {"ds4", "exec", NULL},
+        {"ds4", "exec", "", NULL},
+        {"ds4", "first", "second", NULL},
+        {"ds4", "first", "-p", "second", NULL},
+        {"ds4", "-C", NULL},
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        fflush(NULL);
+        pid_t child = fork();
+        AGENT_TEST_ASSERT(child >= 0);
+        if (child == 0) {
+            if (!freopen("/dev/null", "w", stderr)) _exit(1);
+            int argc = 0;
+            while (invalid[i][argc]) argc++;
+            parse_options(argc, invalid[i]);
+            _exit(0);
+        }
+        int status = 0;
+        if (child > 0) waitpid(child, &status, 0);
+        AGENT_TEST_ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 2);
+    }
+}
+
+static void test_agent_runtime(void) {
+    char cwd[PATH_MAX], after[PATH_MAX];
+    AGENT_TEST_ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+    char fixture[] = "tests/.agent-runtime-XXXXXX";
+    AGENT_TEST_ASSERT(mkdtemp(fixture) != NULL);
+    char *root = realpath(fixture, NULL);
+    AGENT_TEST_ASSERT(root != NULL);
+    if (!root) return;
+    char *bin = ds4_kvstore_path_join(root, "bin");
+    char *share = ds4_kvstore_path_join(root, "share");
+    char *runtime = ds4_kvstore_path_join(share, "ds4");
+    char *executable = ds4_kvstore_path_join(bin, "ds4");
+    char *link = ds4_kvstore_path_join(root, "agent-link");
+    AGENT_TEST_ASSERT(mkdir(bin, 0700) == 0);
+    FILE *fp = fopen(executable, "w");
+    AGENT_TEST_ASSERT(fp != NULL);
+    if (fp) fclose(fp);
+    char *found = agent_runtime_directory(executable);
+    AGENT_TEST_ASSERT(found && !strncmp(found, bin, strlen(bin)));
+    free(found);
+    AGENT_TEST_ASSERT(mkdir(share, 0700) == 0);
+    AGENT_TEST_ASSERT(mkdir(runtime, 0700) == 0);
+    AGENT_TEST_ASSERT(symlink(executable, link) == 0);
+    found = agent_runtime_directory(link);
+    AGENT_TEST_ASSERT(found && !strcmp(found, runtime));
+
+    char *saved_model = getenv("DS4_MODEL") ? xstrdup(getenv("DS4_MODEL")) : NULL;
+    char *saved_metal = getenv("DS4_METAL_SOURCE_DIR") ? xstrdup(getenv("DS4_METAL_SOURCE_DIR")) : NULL;
+    unsetenv("DS4_MODEL");
+    unsetenv("DS4_METAL_SOURCE_DIR");
+    agent_config cfg = {0};
+    agent_configure_runtime(&cfg, found);
+    char *model = ds4_kvstore_path_join(runtime, "ds4flash.gguf");
+    char *metal = ds4_kvstore_path_join(runtime, "metal");
+    AGENT_TEST_ASSERT(!strcmp(cfg.engine.model_path, model));
+    AGENT_TEST_ASSERT(!strcmp(getenv("DS4_METAL_SOURCE_DIR"), metal));
+    free(cfg.model_path_owned);
+    setenv("DS4_MODEL", "custom.gguf", 1);
+    setenv("DS4_METAL_SOURCE_DIR", "custom-metal", 1);
+    cfg = (agent_config){0};
+    agent_configure_runtime(&cfg, found);
+    AGENT_TEST_ASSERT(!strcmp(cfg.engine.model_path, "custom.gguf"));
+    AGENT_TEST_ASSERT(!strcmp(getenv("DS4_METAL_SOURCE_DIR"), "custom-metal"));
+    free(cfg.model_path_owned);
+    cfg = (agent_config){.engine.model_path = "explicit.gguf"};
+    agent_configure_runtime(&cfg, found);
+    AGENT_TEST_ASSERT(!strcmp(cfg.engine.model_path, "explicit.gguf"));
+    AGENT_TEST_ASSERT(getcwd(after, sizeof(after)) && !strcmp(cwd, after));
+    if (saved_model) setenv("DS4_MODEL", saved_model, 1); else unsetenv("DS4_MODEL");
+    if (saved_metal) setenv("DS4_METAL_SOURCE_DIR", saved_metal, 1); else unsetenv("DS4_METAL_SOURCE_DIR");
+
+    unlink(link);
+    unlink(executable);
+    rmdir(runtime);
+    rmdir(share);
+    rmdir(bin);
+    rmdir(root);
+    free(saved_model); free(saved_metal); free(found); free(model); free(metal);
+    free(link); free(executable); free(runtime); free(share); free(bin); free(root);
+}
+
 static void test_fixture(const char *name, const char *data, size_t len) {
     if (!test_output_dir) return;
     char path[PATH_MAX];
@@ -1017,6 +1123,8 @@ int main(int argc, char **argv) {
     agent_config cfg = parse_options((int)(sizeof(options) / sizeof(options[0])), options);
     AGENT_TEST_ASSERT(cfg.engine.vision_path && !strcmp(cfg.engine.vision_path, "mmproj.gguf"));
     AGENT_TEST_ASSERT(cfg.engine.model_path && !strcmp(cfg.engine.model_path, "qwen.gguf"));
+    test_agent_cli();
+    test_agent_runtime();
     ds4_agent_unit_tests_run();
     test_v41_tool_syntax();
     test_qwen_tool_syntax();
