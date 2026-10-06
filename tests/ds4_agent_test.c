@@ -1211,7 +1211,209 @@ static int test_full_context_save(const char *model) {
     return agent_test_failures ? 1 : 0;
 }
 
+static void test_saved_image_data(void) {
+    char path[] = "tests/.agent-image-data-XXXXXX";
+    int fd = mkstemp(path);
+    AGENT_TEST_ASSERT(fd >= 0);
+    if (fd < 0) return;
+    FILE *fp = fdopen(fd, "w+b");
+    AGENT_TEST_ASSERT(fp != NULL);
+    if (!fp) { close(fd); unlink(path); return; }
+    int ids[] = {1, 10, 11, 2, 3, 12, 13, 4};
+    ds4_tokens tokens = {.v = ids, .len = 8, .cap = 8};
+    float pixels[][6] = {{1.25f, -2.5f, 3, 4, 5, 6}, {7, 8, 9, 10, 11, 12}};
+    ds4_vision_span spans[2] = {
+        {.token_start = 1, .embedding = {.token_count = 2, .data = pixels[0],
+            .width = 12, .height = 34, .content_width = 10, .content_height = 30,
+            .layout = 7, .grid_width = 2, .grid_height = 1, .fingerprint = {42}}},
+        {.token_start = 5, .embedding = {.token_count = 2, .data = pixels[1],
+            .width = 56, .height = 78, .fingerprint = {43}}},
+    };
+    char err[256] = {0};
+    AGENT_TEST_ASSERT(agent_kv_write_title_trailer(fp, "image fixture", err, sizeof(err)));
+    off_t trailer = ftello(fp);
+    AGENT_TEST_ASSERT(agent_kv_write_images(fp, &tokens, spans, 2, 3));
+    off_t size = ftello(fp);
+    ds4_kvstore_entry hdr = {.tokens = 8,
+        .ext_flags = DS4_KVSTORE_EXT_SESSION_TITLE | DS4_KVSTORE_EXT_SESSION_IMAGES};
+    rewind(fp);
+    agent_saved_images restored = {0};
+    AGENT_TEST_ASSERT(agent_kv_read_images(fp, &hdr, 3, &restored, err, sizeof(err)));
+    AGENT_TEST_ASSERT(ftello(fp) == 0);
+    AGENT_TEST_ASSERT(agent_tokens_equal(&tokens, &restored.tokens) && restored.count == 2);
+    if (restored.count == 2) {
+        for (size_t i = 0; i < 2; i++) {
+            AGENT_TEST_ASSERT(restored.images[i].token_start == spans[i].token_start);
+            AGENT_TEST_ASSERT(!memcmp(restored.images[i].embedding.data, pixels[i], sizeof(pixels[i])));
+            AGENT_TEST_ASSERT(!memcmp(restored.images[i].embedding.fingerprint, spans[i].embedding.fingerprint, 32));
+            AGENT_TEST_ASSERT(restored.images[i].embedding.width == spans[i].embedding.width);
+        }
+        AGENT_TEST_ASSERT(restored.images[0].embedding.content_height == 30);
+        AGENT_TEST_ASSERT(restored.images[0].embedding.layout == 7);
+        AGENT_TEST_ASSERT(restored.images[0].embedding.grid_width == 2);
+    }
+    agent_saved_images_free(&restored);
+    AGENT_TEST_ASSERT(!agent_kv_read_images(fp, &hdr, 4, &restored, err, sizeof(err)));
+    unsigned char *bytes = xmalloc((size_t)size);
+    rewind(fp);
+    AGENT_TEST_ASSERT(fread(bytes, 1, (size_t)size, fp) == (size_t)size);
+    fclose(fp);
+    /* Every truncated prefix must fail without publishing partially read images. */
+    for (off_t n = 0; n < size; n++) {
+        fp = fopen(path, "w+b");
+        AGENT_TEST_ASSERT(fp != NULL);
+        if (!fp) break;
+        AGENT_TEST_ASSERT(fwrite(bytes, 1, (size_t)n, fp) == (size_t)n);
+        rewind(fp);
+        AGENT_TEST_ASSERT(!agent_kv_read_images(fp, &hdr, 3, &restored, err, sizeof(err)));
+        AGENT_TEST_ASSERT(!restored.images && !restored.tokens.v && !restored.count);
+        fclose(fp);
+    }
+    struct { off_t offset; uint32_t value; } invalid[] = {
+        {0, 0}, {4, UINT32_MAX}, {8, UINT32_MAX},
+        {40, 8}, {44, UINT32_MAX}, {40 + 92, 1},
+        {40 + 68, 0x7f800000u},
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); i++) {
+        fp = fopen(path, "w+b");
+        AGENT_TEST_ASSERT(fp != NULL);
+        if (!fp) break;
+        AGENT_TEST_ASSERT(fwrite(bytes, 1, (size_t)size, fp) == (size_t)size);
+        AGENT_TEST_ASSERT(fseeko(fp, trailer + invalid[i].offset, SEEK_SET) == 0);
+        AGENT_TEST_ASSERT(agent_kv_write_words(fp, &invalid[i].value, 1));
+        rewind(fp);
+        AGENT_TEST_ASSERT(!agent_kv_read_images(fp, &hdr, 3, &restored, err, sizeof(err)));
+        AGENT_TEST_ASSERT(!restored.images && !restored.tokens.v && !restored.count);
+        fclose(fp);
+    }
+    free(bytes);
+    unlink(path);
+}
+
+static int test_image_session_save(const char *model, const char *vision) {
+    ds4_engine_options opt = {.model_path = model, .vision_path = vision,
+        .backend = default_backend(), .context_size = 4096, .power_percent = 100};
+    agent_config cfg = {.gen = {.ctx_size = 4096}, .non_interactive = true};
+    agent_worker w = {.cfg = &cfg, .initialized = true, .user_activity = true,
+        .wake_fd = {-1, -1}, .status = {.state = AGENT_WORKER_IDLE}};
+    pthread_mutex_init(&w.mu, NULL);
+    char dir[] = "tests/.agent-image-session-XXXXXX";
+    AGENT_TEST_ASSERT(mkdtemp(dir) != NULL);
+    w.cache_dir = dir;
+    AGENT_TEST_ASSERT(ds4_engine_open(&w.engine, &opt) == 0);
+    if (!w.engine) return 1;
+    AGENT_TEST_ASSERT(ds4_session_create(&w.session, w.engine, 4096) == 0);
+    if (!w.session) { ds4_engine_close(w.engine); return 1; }
+    char err[256] = {0}, image_sha[41], text_sha[41];
+    ds4_chat_begin(w.engine, &w.transcript);
+    ds4_chat_append_message(w.engine, &w.transcript, "user", "Remember the word cedar.");
+    w.session_title = xstrdup("text session");
+    w.session_created_at = 123;
+    AGENT_TEST_ASSERT(agent_worker_save_session_now(&w, text_sha, NULL, err, sizeof(err)));
+
+    const char *fixtures[] = {"tests/vision-fixtures/qwen38/maple.png",
+                              "tests/vision-fixtures/qwen38/orbit.png"};
+    for (size_t i = 0; i < 2; i++) {
+        char *encoded = NULL;
+        size_t bytes = 0;
+        AGENT_TEST_ASSERT(agent_read_file_bytes(fixtures[i], &encoded, &bytes, err, sizeof(err)) == 0);
+        char *path = ds4_kvstore_path_join(dir, "input.png");
+        FILE *fp = fopen(path, "wb");
+        AGENT_TEST_ASSERT(fp != NULL);
+        if (!fp) { free(path); free(encoded); continue; }
+        AGENT_TEST_ASSERT(fwrite(encoded, 1, bytes, fp) == bytes);
+        fclose(fp);
+        free(encoded);
+        ds4_vision_embedding embedding = {0};
+        AGENT_TEST_ASSERT(ds4_engine_vision_encode_file(w.engine, path, &embedding, err, sizeof(err)));
+        unlink(path);
+        free(path);
+        const char *parts[] = {"Read this image.", ""};
+        ds4_vision_span span = {0};
+        AGENT_TEST_ASSERT(ds4_chat_append_multimodal_message(w.engine, &w.transcript,
+            "user", parts, &embedding, 1, &span, err, sizeof(err)));
+        agent_worker_images_append(&w, &span, 1);
+    }
+    ds4_chat_append_assistant_prefix(w.engine, &w.transcript, DS4_THINK_NONE);
+    ds4_session_invalidate(w.session);
+    AGENT_TEST_ASSERT(agent_worker_sync_tokens(&w, &w.transcript, false, err, sizeof(err)) == 0);
+    ds4_tokens original = {0};
+    ds4_tokens_copy(&original, &w.transcript);
+    ds4_token_score expected[8], actual[8];
+    AGENT_TEST_ASSERT(ds4_session_top_logprobs(w.session, expected, 8) == 8);
+    free(w.session_title);
+    w.session_title = xstrdup("two image session");
+    w.session_created_at = 456;
+    AGENT_TEST_ASSERT(agent_worker_save_session_now(&w, image_sha, NULL, err, sizeof(err)));
+    AGENT_TEST_ASSERT(!w.session_dirty && w.image_count == 2);
+    /* Preserve an image transcript even when a smaller context cannot prefill it. */
+    ds4_session_free(w.session);
+    w.session = NULL;
+    AGENT_TEST_ASSERT(ds4_session_create(&w.session, w.engine, 256) == 0);
+    cfg.gen.ctx_size = 256;
+    AGENT_TEST_ASSERT(agent_worker_save_session_now(&w, image_sha, NULL, err, sizeof(err)));
+    cfg.gen.ctx_size = 4096;
+    uint32_t stripped_tokens = 0;
+    AGENT_TEST_ASSERT(agent_worker_strip_session(&w, image_sha, NULL, &stripped_tokens, err, sizeof(err)));
+    AGENT_TEST_ASSERT(stripped_tokens == (uint32_t)original.len);
+
+    /* A new backend session ensures the restore cannot reuse the live image KV. */
+    ds4_session_free(w.session);
+    w.session = NULL;
+    agent_worker_images_clear(&w);
+    ds4_tokens_free(&w.transcript);
+    AGENT_TEST_ASSERT(ds4_session_create(&w.session, w.engine, 4096) == 0);
+    w.status.state = AGENT_WORKER_IDLE;
+    bool ok = agent_worker_switch_session(&w, image_sha, 0, err, sizeof(err));
+    if (!ok) fprintf(stderr, "image restore: %s\n", err);
+    AGENT_TEST_ASSERT(ok);
+    AGENT_TEST_ASSERT(w.image_count == 2 && agent_tokens_equal(&original, &w.transcript));
+    AGENT_TEST_ASSERT(ds4_session_vision_state_matches(w.session, w.images, w.image_count));
+    AGENT_TEST_ASSERT(ds4_session_top_logprobs(w.session, actual, 8) == 8);
+    for (int i = 0; i < 8; i++) {
+        AGENT_TEST_ASSERT(actual[i].id == expected[i].id);
+        AGENT_TEST_ASSERT(fabsf(actual[i].logit - expected[i].logit) < 0.02f);
+    }
+    int next = ds4_session_argmax(w.session);
+    AGENT_TEST_ASSERT(ds4_session_eval(w.session, next, err, sizeof(err)) == 0);
+    ds4_tokens_push(&w.transcript, next);
+    AGENT_TEST_ASSERT(agent_worker_save_session_now(&w, image_sha, NULL, err, sizeof(err)));
+    AGENT_TEST_ASSERT(agent_worker_switch_session(&w, text_sha, 0, err, sizeof(err)));
+    AGENT_TEST_ASSERT(w.image_count == 0 && !ds4_session_has_vision_state(w.session));
+    AGENT_TEST_ASSERT(agent_worker_switch_session(&w, image_sha, 0, err, sizeof(err)));
+    AGENT_TEST_ASSERT(w.image_count == 2 && w.transcript.len == original.len + 1);
+
+    char *image_path = agent_kv_path_for_sha(dir, image_sha);
+    char *text_path = agent_kv_path_for_sha(dir, text_sha);
+    FILE *fp = fopen(image_path, "r+b");
+    AGENT_TEST_ASSERT(fp != NULL);
+    if (fp) {
+        AGENT_TEST_ASSERT(fseeko(fp, 0, SEEK_END) == 0);
+        AGENT_TEST_ASSERT(ftruncate(fileno(fp), ftello(fp) - 1) == 0);
+        fclose(fp);
+        ds4_vision_span *before = w.images;
+        int pos = ds4_session_pos(w.session);
+        AGENT_TEST_ASSERT(!agent_worker_switch_session(&w, image_sha, 0, err, sizeof(err)));
+        AGENT_TEST_ASSERT(w.images == before && w.image_count == 2);
+        AGENT_TEST_ASSERT(ds4_session_pos(w.session) == pos && ds4_session_checkpoint_valid(w.session));
+    }
+    unlink(image_path); unlink(text_path);
+    free(image_path); free(text_path);
+    ds4_tokens_free(&original);
+    ds4_tokens_free(&w.transcript);
+    agent_worker_images_clear(&w);
+    ds4_session_free(w.session);
+    ds4_engine_close(w.engine);
+    free(w.session_title);
+    free(w.legacy_session_path_to_delete);
+    pthread_mutex_destroy(&w.mu);
+    rmdir(dir);
+    if (!agent_test_failures) puts("image session save/restore: ok");
+    return agent_test_failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "--image-session-save")) return test_image_session_save(argv[2], argv[3]);
     if (argc == 3 && !strcmp(argv[1], "--flash-think-toggle")) return test_flash_thinking(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--full-context-save")) return test_full_context_save(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--think-fixture")) return test_v41_thinking(argv[2]);
@@ -1225,6 +1427,7 @@ int main(int argc, char **argv) {
     test_agent_cli();
     test_agent_runtime();
     test_think_commands();
+    test_saved_image_data();
     ds4_agent_unit_tests_run();
     test_v41_tool_syntax();
     test_qwen_tool_syntax();

@@ -152,8 +152,9 @@ Sessions are stored in `~/.ds4/kvcache`:
 | `/strip <sha>` | Keep text and title, removing the large KV payload |
 
 Compatible local KV snapshots avoid rebuilding the prompt. Stripped sessions
-and network TP restores require prefill. Sessions containing images cannot yet
-be saved. Saved conversations and traces may contain private information.
+and network TP restores require prefill. Image sessions retain their visual
+embeddings and rebuild the cache on restore. Saved conversations and traces may
+contain private information.
 
 For Pi, OpenCode, Codex CLI, or Claude Code, use `ds4-server` instead and follow
 the [client setup guide](docs/CLIENTS.md).
