@@ -91,6 +91,7 @@ typedef struct {
     const char *gpu_devices_arg;
     const char *chdir_path;
     char *model_path_owned;
+    char *vision_path_owned;
     bool non_interactive;
     bool edit_upto;
 } agent_config;
@@ -755,6 +756,15 @@ static void agent_configure_runtime(agent_config *cfg, const char *runtime) {
             runtime ? ds4_kvstore_path_join(runtime, "ds4flash.gguf") :
                       xstrdup("ds4flash.gguf");
         cfg->engine.model_path = cfg->model_path_owned;
+        if ((!model || !model[0]) && runtime && !cfg->engine.vision_path) {
+            char *vision = ds4_kvstore_path_join(runtime, "ds4vision.gguf");
+            if (access(vision, R_OK) == 0) {
+                cfg->vision_path_owned = vision;
+                cfg->engine.vision_path = vision;
+            } else {
+                free(vision);
+            }
+        }
     }
     const char *metal = getenv("DS4_METAL_SOURCE_DIR");
     if (runtime && (!metal || !metal[0])) {
@@ -13930,6 +13940,7 @@ int main(int argc, char **argv) {
     ds4_tp_free(tp_leader);
     free(cfg.gen.prompt_owned);
     free(cfg.model_path_owned);
+    free(cfg.vision_path_owned);
     ds4_prompt_prefix_free(&cfg.gen.prefix);
     return rc;
 }

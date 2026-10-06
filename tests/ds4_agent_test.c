@@ -88,29 +88,48 @@ static void test_agent_runtime(void) {
     char *model = ds4_kvstore_path_join(runtime, "ds4flash.gguf");
     char *metal = ds4_kvstore_path_join(runtime, "metal");
     AGENT_TEST_ASSERT(!strcmp(cfg.engine.model_path, model));
+    AGENT_TEST_ASSERT(!cfg.engine.vision_path);
     AGENT_TEST_ASSERT(!strcmp(getenv("DS4_METAL_SOURCE_DIR"), metal));
+    free(cfg.model_path_owned);
+    char *vision = ds4_kvstore_path_join(runtime, "ds4vision.gguf");
+    fp = fopen(vision, "w");
+    AGENT_TEST_ASSERT(fp != NULL);
+    if (fp) fclose(fp);
+    cfg = (agent_config){0};
+    agent_configure_runtime(&cfg, found);
+    AGENT_TEST_ASSERT(cfg.engine.vision_path && !strcmp(cfg.engine.vision_path, vision));
+    free(cfg.model_path_owned);
+    free(cfg.vision_path_owned);
+    cfg = (agent_config){.engine.vision_path = "explicit-encoder.gguf"};
+    agent_configure_runtime(&cfg, found);
+    AGENT_TEST_ASSERT(!strcmp(cfg.engine.vision_path, "explicit-encoder.gguf"));
+    AGENT_TEST_ASSERT(!cfg.vision_path_owned);
     free(cfg.model_path_owned);
     setenv("DS4_MODEL", "custom.gguf", 1);
     setenv("DS4_METAL_SOURCE_DIR", "custom-metal", 1);
     cfg = (agent_config){0};
     agent_configure_runtime(&cfg, found);
     AGENT_TEST_ASSERT(!strcmp(cfg.engine.model_path, "custom.gguf"));
+    AGENT_TEST_ASSERT(!cfg.engine.vision_path);
     AGENT_TEST_ASSERT(!strcmp(getenv("DS4_METAL_SOURCE_DIR"), "custom-metal"));
     free(cfg.model_path_owned);
     cfg = (agent_config){.engine.model_path = "explicit.gguf"};
     agent_configure_runtime(&cfg, found);
     AGENT_TEST_ASSERT(!strcmp(cfg.engine.model_path, "explicit.gguf"));
+    AGENT_TEST_ASSERT(!cfg.engine.vision_path);
     AGENT_TEST_ASSERT(getcwd(after, sizeof(after)) && !strcmp(cwd, after));
     if (saved_model) setenv("DS4_MODEL", saved_model, 1); else unsetenv("DS4_MODEL");
     if (saved_metal) setenv("DS4_METAL_SOURCE_DIR", saved_metal, 1); else unsetenv("DS4_METAL_SOURCE_DIR");
 
     unlink(link);
     unlink(executable);
+    unlink(vision);
     rmdir(runtime);
     rmdir(share);
     rmdir(bin);
     rmdir(root);
     free(saved_model); free(saved_metal); free(found); free(model); free(metal);
+    free(vision);
     free(link); free(executable); free(runtime); free(share); free(bin); free(root);
 }
 

@@ -29,7 +29,9 @@ DS4_TEST_MTP ?= gguf/DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf
 DS4_DSPARK_MODEL ?= $(DS4_TEST_MODEL)
 DS4_DSPARK_SUPPORT ?= gguf/DeepSeek-V4-Flash-DSpark-support-0731.gguf
 PREFIX ?= $(HOME)/.local
-INSTALL_MODEL ?= $(realpath ds4flash.gguf)
+INSTALLED_MODEL := $(realpath $(DESTDIR)$(PREFIX)/share/ds4/ds4flash.gguf)
+INSTALL_MODEL ?= $(or $(INSTALLED_MODEL),$(realpath ds4flash.gguf))
+INSTALL_VISION ?= $(if $(filter $(realpath $(INSTALL_MODEL)),$(INSTALLED_MODEL)),$(realpath $(DESTDIR)$(PREFIX)/share/ds4/ds4vision.gguf))
 
 ifeq ($(LLGUIDANCE),1)
 ifeq ($(LLGUIDANCE_DIR),.deps/llguidance)
@@ -1191,10 +1193,14 @@ install: install-user
 install-user: ds4-agent
 	@test -f "$(INSTALL_MODEL)" && test -r "$(INSTALL_MODEL)" || { echo "Set INSTALL_MODEL to a readable model GGUF." >&2; exit 1; }
 	@case "$(INSTALL_MODEL)" in /*) ;; *) echo "INSTALL_MODEL must be an absolute path." >&2; exit 1 ;; esac
+	@test -z "$(INSTALL_VISION)" || { test -f "$(INSTALL_VISION)" && test -r "$(INSTALL_VISION)"; } || { echo "Set INSTALL_VISION to a readable encoder GGUF." >&2; exit 1; }
+	@case "$(INSTALL_VISION)" in ""|/*) ;; *) echo "INSTALL_VISION must be an absolute path." >&2; exit 1 ;; esac
 	@test ! -e "$(DESTDIR)$(PREFIX)/share/ds4/ds4flash.gguf" || test -L "$(DESTDIR)$(PREFIX)/share/ds4/ds4flash.gguf" || { echo "Refusing to replace a model file; move it and pass its path as INSTALL_MODEL." >&2; exit 1; }
+	@test ! -e "$(DESTDIR)$(PREFIX)/share/ds4/ds4vision.gguf" || test -L "$(DESTDIR)$(PREFIX)/share/ds4/ds4vision.gguf" || { echo "Refusing to replace an encoder file; move it and pass its path as INSTALL_VISION." >&2; exit 1; }
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/share/ds4/metal"
 	install -m 644 $(METAL_SRCS) "$(DESTDIR)$(PREFIX)/share/ds4/metal/"
 	ln -sfn "$(INSTALL_MODEL)" "$(DESTDIR)$(PREFIX)/share/ds4/ds4flash.gguf"
+	@if test -n "$(INSTALL_VISION)"; then ln -sfn "$(INSTALL_VISION)" "$(DESTDIR)$(PREFIX)/share/ds4/ds4vision.gguf"; else rm -f "$(DESTDIR)$(PREFIX)/share/ds4/ds4vision.gguf"; fi
 	install -m 755 ds4-agent "$(DESTDIR)$(PREFIX)/bin/ds4"
 	@echo "Installed $(PREFIX)/bin/ds4. Run ds4 from your project directory."
 
