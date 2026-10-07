@@ -28,6 +28,9 @@ static void test_agent_cli(void) {
     char *reserved[] = {"ds4", "--", "exec"};
     cfg = parse_options(3, reserved);
     AGENT_TEST_ASSERT(!cfg.non_interactive && !strcmp(cfg.gen.prompt, "exec"));
+    char *no_mtp[] = {"ds4", "--no-mtp"};
+    cfg = parse_options(2, no_mtp);
+    AGENT_TEST_ASSERT(cfg.no_mtp && !cfg.engine.dspark && !cfg.engine.mtp_path);
 
     char *invalid[][5] = {
         {"ds4", "exec", NULL},
@@ -35,6 +38,9 @@ static void test_agent_cli(void) {
         {"ds4", "first", "second", NULL},
         {"ds4", "first", "-p", "second", NULL},
         {"ds4", "-C", NULL},
+        {"ds4", "--no-mtp", "--dspark", NULL},
+        {"ds4", "--mtp", "--no-mtp", NULL},
+        {"ds4", "--no-mtp", "--mtp-model", "draft.gguf", NULL},
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
         fflush(NULL);
@@ -118,18 +124,48 @@ static void test_agent_runtime(void) {
     AGENT_TEST_ASSERT(!strcmp(cfg.engine.model_path, "explicit.gguf"));
     AGENT_TEST_ASSERT(!cfg.engine.vision_path);
     AGENT_TEST_ASSERT(getcwd(after, sizeof(after)) && !strcmp(cwd, after));
+    char *mtp = ds4_kvstore_path_join(runtime, "ds4dspark.gguf");
+    fp = fopen(mtp, "w");
+    AGENT_TEST_ASSERT(fp != NULL);
+    if (fp) fclose(fp);
+    cfg = (agent_config){0};
+    agent_configure_runtime(&cfg, found);
+    AGENT_TEST_ASSERT(!cfg.engine.mtp_path && !cfg.engine.dspark);
+    free(cfg.model_path_owned);
+    unsetenv("DS4_MODEL");
+    cfg = (agent_config){0};
+    agent_configure_runtime(&cfg, found);
+    AGENT_TEST_ASSERT(cfg.engine.dspark && cfg.engine.mtp_path &&
+                      !strcmp(cfg.engine.mtp_path, mtp));
+    free(cfg.model_path_owned); free(cfg.vision_path_owned); free(cfg.mtp_path_owned);
+    agent_config overrides[] = {
+        {.no_mtp = true},
+        {.engine.mtp_path = "explicit-drafter.gguf"},
+        {.engine.glm_mtp = true},
+        {.engine.ngram_spec_draft_tokens = 5},
+        {.engine.model_path = "explicit.gguf"},
+    };
+    for (size_t i = 0; i < sizeof(overrides) / sizeof(*overrides); i++) {
+        agent_configure_runtime(&overrides[i], found);
+        AGENT_TEST_ASSERT(!overrides[i].mtp_path_owned && !overrides[i].engine.dspark);
+        if (i == 1) AGENT_TEST_ASSERT(!strcmp(overrides[i].engine.mtp_path, "explicit-drafter.gguf"));
+        free(overrides[i].model_path_owned);
+        free(overrides[i].vision_path_owned);
+    }
     if (saved_model) setenv("DS4_MODEL", saved_model, 1); else unsetenv("DS4_MODEL");
     if (saved_metal) setenv("DS4_METAL_SOURCE_DIR", saved_metal, 1); else unsetenv("DS4_METAL_SOURCE_DIR");
 
     unlink(link);
     unlink(executable);
     unlink(vision);
+    unlink(mtp);
     rmdir(runtime);
     rmdir(share);
     rmdir(bin);
     rmdir(root);
     free(saved_model); free(saved_metal); free(found); free(model); free(metal);
     free(vision);
+    free(mtp);
     free(link); free(executable); free(runtime); free(share); free(bin); free(root);
 }
 

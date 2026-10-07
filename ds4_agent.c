@@ -92,6 +92,8 @@ typedef struct {
     const char *chdir_path;
     char *model_path_owned;
     char *vision_path_owned;
+    char *mtp_path_owned;
+    bool no_mtp;
     bool non_interactive;
     bool edit_upto;
 } agent_config;
@@ -765,6 +767,18 @@ static void agent_configure_runtime(agent_config *cfg, const char *runtime) {
                 free(vision);
             }
         }
+        if ((!model || !model[0]) && runtime && !cfg->no_mtp &&
+            !cfg->engine.mtp_path && !cfg->engine.glm_mtp &&
+            !cfg->engine.ngram_spec_draft_tokens) {
+            char *mtp = ds4_kvstore_path_join(runtime, "ds4dspark.gguf");
+            if (access(mtp, R_OK) == 0) {
+                cfg->mtp_path_owned = mtp;
+                cfg->engine.mtp_path = mtp;
+                cfg->engine.dspark = true;
+            } else {
+                free(mtp);
+            }
+        }
     }
     const char *metal = getenv("DS4_METAL_SOURCE_DIR");
     if (runtime && (!metal || !metal[0])) {
@@ -909,6 +923,8 @@ static agent_config parse_options(int argc, char **argv) {
             c.engine.vision_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--mtp")) {
             c.engine.glm_mtp = true;
+        } else if (!strcmp(arg, "--no-mtp")) {
+            c.no_mtp = true;
         } else if (!strcmp(arg, "--mtp-model")) {
             c.engine.mtp_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--mtp-draft")) {
@@ -1054,6 +1070,10 @@ static agent_config parse_options(int argc, char **argv) {
 
     if (exec_mode && (!c.gen.prompt || !c.gen.prompt[0])) {
         fprintf(stderr, "ds4-agent: exec requires a prompt or --prompt-file FILE\n");
+        exit(2);
+    }
+    if (c.no_mtp && (c.engine.mtp_path || c.engine.dspark || c.engine.glm_mtp)) {
+        fprintf(stderr, "ds4-agent: --no-mtp cannot be combined with MTP or DSpark options\n");
         exit(2);
     }
     if (c.engine.directional_steering_file && !steering_scale_set)
@@ -13941,6 +13961,7 @@ int main(int argc, char **argv) {
     free(cfg.gen.prompt_owned);
     free(cfg.model_path_owned);
     free(cfg.vision_path_owned);
+    free(cfg.mtp_path_owned);
     ds4_prompt_prefix_free(&cfg.gen.prefix);
     return rc;
 }

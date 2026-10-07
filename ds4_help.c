@@ -187,7 +187,11 @@ static void print_model_runtime(FILE *fp, const help_colors *c,
         }
         if (tool == DS4_HELP_DS4 || tool == DS4_HELP_AGENT || tool == DS4_HELP_SERVER) {
             opt(fp, c, "--mtp", "Enable model-embedded MTP speculation.");
-            opt(fp, c, "--mtp-model FILE", "External MTP or DSpark support GGUF.");
+            if (tool == DS4_HELP_AGENT)
+                opt(fp, c, "--no-mtp", "Disable the installed default DSpark drafter.");
+            opt(fp, c, "--mtp-model FILE", tool == DS4_HELP_AGENT ?
+                "External MTP or DSpark support GGUF. The installed DSpark drafter is enabled with the default model." :
+                "External MTP or DSpark support GGUF.");
             opt(fp, c, "--mtp-draft N", "Maximum autoregressive MTP draft tokens. Default: 1");
             opt(fp, c, "--mtp-margin F", "Verifier confidence margin for fast MTP acceptance. Default: 3");
             opt(fp, c, "--mtp-timing", "Enable embedded MTP and print acceptance/timing counters.");

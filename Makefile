@@ -32,6 +32,7 @@ PREFIX ?= $(HOME)/.local
 INSTALLED_MODEL := $(realpath $(DESTDIR)$(PREFIX)/share/ds4/ds4flash.gguf)
 INSTALL_MODEL ?= $(or $(INSTALLED_MODEL),$(realpath ds4flash.gguf))
 INSTALL_VISION ?= $(if $(filter $(realpath $(INSTALL_MODEL)),$(INSTALLED_MODEL)),$(realpath $(DESTDIR)$(PREFIX)/share/ds4/ds4vision.gguf))
+INSTALL_DSPARK ?= $(if $(filter $(realpath $(INSTALL_MODEL)),$(INSTALLED_MODEL)),$(realpath $(DESTDIR)$(PREFIX)/share/ds4/ds4dspark.gguf))
 
 ifeq ($(LLGUIDANCE),1)
 ifeq ($(LLGUIDANCE_DIR),.deps/llguidance)
@@ -1195,12 +1196,16 @@ install-user: ds4-agent
 	@case "$(INSTALL_MODEL)" in /*) ;; *) echo "INSTALL_MODEL must be an absolute path." >&2; exit 1 ;; esac
 	@test -z "$(INSTALL_VISION)" || { test -f "$(INSTALL_VISION)" && test -r "$(INSTALL_VISION)"; } || { echo "Set INSTALL_VISION to a readable encoder GGUF." >&2; exit 1; }
 	@case "$(INSTALL_VISION)" in ""|/*) ;; *) echo "INSTALL_VISION must be an absolute path." >&2; exit 1 ;; esac
+	@test -z "$(INSTALL_DSPARK)" || { test -f "$(INSTALL_DSPARK)" && test -r "$(INSTALL_DSPARK)"; } || { echo "Set INSTALL_DSPARK to a readable DSpark support GGUF." >&2; exit 1; }
+	@case "$(INSTALL_DSPARK)" in ""|/*) ;; *) echo "INSTALL_DSPARK must be an absolute path." >&2; exit 1 ;; esac
 	@test ! -e "$(DESTDIR)$(PREFIX)/share/ds4/ds4flash.gguf" || test -L "$(DESTDIR)$(PREFIX)/share/ds4/ds4flash.gguf" || { echo "Refusing to replace a model file; move it and pass its path as INSTALL_MODEL." >&2; exit 1; }
 	@test ! -e "$(DESTDIR)$(PREFIX)/share/ds4/ds4vision.gguf" || test -L "$(DESTDIR)$(PREFIX)/share/ds4/ds4vision.gguf" || { echo "Refusing to replace an encoder file; move it and pass its path as INSTALL_VISION." >&2; exit 1; }
+	@test ! -e "$(DESTDIR)$(PREFIX)/share/ds4/ds4dspark.gguf" || test -L "$(DESTDIR)$(PREFIX)/share/ds4/ds4dspark.gguf" || { echo "Refusing to replace a support file; move it and pass its path as INSTALL_DSPARK." >&2; exit 1; }
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/share/ds4/metal"
 	install -m 644 $(METAL_SRCS) "$(DESTDIR)$(PREFIX)/share/ds4/metal/"
 	ln -sfn "$(INSTALL_MODEL)" "$(DESTDIR)$(PREFIX)/share/ds4/ds4flash.gguf"
 	@if test -n "$(INSTALL_VISION)"; then ln -sfn "$(INSTALL_VISION)" "$(DESTDIR)$(PREFIX)/share/ds4/ds4vision.gguf"; else rm -f "$(DESTDIR)$(PREFIX)/share/ds4/ds4vision.gguf"; fi
+	@if test -n "$(INSTALL_DSPARK)"; then ln -sfn "$(INSTALL_DSPARK)" "$(DESTDIR)$(PREFIX)/share/ds4/ds4dspark.gguf"; else rm -f "$(DESTDIR)$(PREFIX)/share/ds4/ds4dspark.gguf"; fi
 	install -m 755 ds4-agent "$(DESTDIR)$(PREFIX)/bin/ds4"
 	@echo "Installed $(PREFIX)/bin/ds4. Run ds4 from your project directory."
 
