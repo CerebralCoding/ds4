@@ -32260,6 +32260,18 @@ static bool metal_graph_encode_layer_attention_batch(
             uint32_t use_comp_mask = 0;
             bool use_indexed_comp = false;
             double index_stage_t0 = 0.0;
+            /* Verify-shaped batches (DSpark/MTP suffix re-verification, never
+             * more than a few draft tokens) must pick the same dense-vs-indexed
+             * branch that single-token decode would for the same n_comp, or the
+             * verifier attends over a different candidate set than the decode
+             * path it's supposed to be reproducing.  Real multi-thousand-token
+             * prefill chunks keep the original DS4_N_INDEXER_TOP_K cutover --
+             * decode's amortization argument for going sparse earlier hasn't
+             * been separately validated at that scale. */
+            const bool verify_shaped_batch = n_tokens <= 8;
+            const uint32_t indexer_dense_threshold = verify_shaped_batch
+                ? metal_graph_decode_indexer_sparse_threshold(g)
+                : DS4_N_INDEXER_TOP_K;
 
             ok = ds4_gpu_store_raw_kv_batch_tensor(g->layer_raw_cache[il],
                                                      metal_graph_batch_kv(g),
@@ -32267,7 +32279,7 @@ static bool metal_graph_encode_layer_attention_batch(
                                                      pos0,
                                                      n_tokens,
                                                      DS4_N_HEAD_DIM) != 0;
-            if (ok && ratio == 4 && n_comp > DS4_N_INDEXER_TOP_K) {
+            if (ok && ratio == 4 && n_comp > indexer_dense_threshold) {
                 const float index_scale = 1.0f / sqrtf((float)(DS4_N_INDEXER_HEAD_DIM * DS4_N_INDEXER_HEAD));
                 if (index_stage_profile) {
                     ok = metal_graph_indexer_stage_profile_boundary(NULL,
@@ -60701,6 +60713,7 @@ struct ds4_session {
     uint32_t dspark_sched_skip;
     uint32_t dspark_sched_miss_streak;
     uint32_t dspark_sched_credit;
+    uint32_t dspark_sched_lifetime_cycles;
     uint32_t dspark_sched_lifetime_accepted;
     double dspark_sched_life_extra_ms;
     double dspark_sched_life_saved_ms;
@@ -60955,6 +60968,7 @@ static void ds4_session_dspark_scheduler_begin_request(ds4_session *s) {
     s->dspark_sched_skip = 0;
     s->dspark_sched_miss_streak = 0;
     s->dspark_sched_credit = 0;
+    s->dspark_sched_lifetime_cycles = 0;
     s->dspark_sched_lifetime_accepted = 0;
     s->dspark_sched_life_extra_ms = 0.0;
     s->dspark_sched_life_saved_ms = 0.0;
@@ -60995,6 +61009,8 @@ static void ds4_session_dspark_scheduler_note(
     }
 
     s->dspark_sched_cycles++;
+    if (s->dspark_sched_lifetime_cycles < UINT32_MAX)
+        s->dspark_sched_lifetime_cycles++;
     s->dspark_sched_accepted += accepted_drafts;
     if (accepted_drafts != 0) {
         if (s->dspark_sched_lifetime_accepted <=
@@ -61177,16 +61193,25 @@ static void ds4_session_dspark_scheduler_note(
         s->dspark_sched_accepted != 0 &&
         extra_per_accept_ms * 1000.0 > (double)max_ms_per_accept_milli;
     if (low_accept || many_no_draft || slow_accept || measured_unprofitable) {
-        if (ds4_session_dspark_rocm_gfx1151_fast_path(s)) {
+        /* Give warmup two windows before abandoning a low-yield request. */
+        const bool low_lifetime_metal_bypass =
+            s->engine && s->engine->backend == DS4_BACKEND_METAL &&
+            (uint64_t)s->dspark_sched_lifetime_cycles >= 2ull * window &&
+            2ull * s->dspark_sched_lifetime_accepted <
+                s->dspark_sched_lifetime_cycles;
+        if (ds4_session_dspark_rocm_gfx1151_fast_path(s) ||
+            low_lifetime_metal_bypass) {
             s->dspark_sched_bypass = true;
             s->dspark_sched_skip = 0;
             if (getenv("DS4_DSPARK_SPEC_LOG") != NULL) {
                 fprintf(stderr,
                         "ds4: DSpark scheduler bypass accepted=%u avg=%.3f "
-                        "no_draft=%u\n",
+                        "no_draft=%u lifetime=%u/%u\n",
                         s->dspark_sched_accepted,
                         (double)avg_milli / 1000.0,
-                        s->dspark_sched_no_draft);
+                        s->dspark_sched_no_draft,
+                        s->dspark_sched_lifetime_accepted,
+                        s->dspark_sched_lifetime_cycles);
             }
             ds4_session_dspark_scheduler_reset(s);
             return;
@@ -81627,6 +81652,29 @@ static int ds4_session_eval_dspark_speculative_stochastic(
         }
         ds4_session_dspark_scheduler_note(
             s, 0, false, DS4_DSPARK_STOCH_EXTRA_MS());
+        DS4_DSPARK_STOCH_FINISH();
+        return n_accept;
+    }
+    if (draft_n == 1) {
+        /* Position 0 just got accepted above and it's the entire draft, so
+         * there is nothing left for the batched verifier to check -- the
+         * only remaining work is committing drafts[0] and obtaining next-
+         * token logits, which a plain decode step gives at a fraction of
+         * the cost of a full multi-layer batch dispatch at n_tokens == 1
+         * (mirrors the position-0-rejection cheap path just above). */
+        if (ds4_session_eval_probe_tp(s, drafts[0], false, err, errlen) != 0) {
+            DS4_DSPARK_STOCH_FINISH();
+            return -1;
+        }
+        accepted[n_accept++] = drafts[0];
+        if (stats_enabled) {
+            s->dspark_stats.full_accepts++;
+            s->dspark_stats.direct_full_commits++;
+            s->dspark_stats.accepted_draft_tokens += 1;
+            ds4_dspark_stats_note_len(s->dspark_stats.accepted_len_hist, 1);
+        }
+        ds4_session_dspark_scheduler_note(
+            s, 1, false, DS4_DSPARK_STOCH_EXTRA_MS());
         DS4_DSPARK_STOCH_FINISH();
         return n_accept;
     }

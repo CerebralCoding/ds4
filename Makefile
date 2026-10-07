@@ -658,6 +658,9 @@ tests/test_image_decode.o: tests/test_image_decode.c ds4_image.h
 tests/test_image_decode: tests/test_image_decode.o ds4_image.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 
+tests/test_image_resize: tests/test_image_resize.c ds4_image.c ds4_image.h third_party/iris/jpeg.h
+	$(CC) $(CFLAGS) -I. -o $@ $< -lm
+
 ifeq ($(UNAME_S),Darwin)
 $(GLM53_KDA_TEST): tests/test_glm53_kda.o ds4_metal.o ds4_image.o
 	$(CC) $(CFLAGS) -o $@ $^ $(METAL_LDLIBS)
@@ -1056,7 +1059,7 @@ tests/test_web_recovery: tests/test_web_recovery.c ds4_web.c ds4_web.h
 
 test: test-llguidance ds4_test ds4_agent_test ds4-eval q4k-dot-test mxfp4-dot-test test-session-state test-linux-memory test-engram test-web-recovery \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \
-	tests/test_deepseek4_vision_image tests/test_image_decode tests/test_prompt_prefix $(SAMPLING_TEST) ds4 ds4-server ds4-bench ds4-agent
+	tests/test_deepseek4_vision_image tests/test_image_decode tests/test_image_resize tests/test_prompt_prefix $(SAMPLING_TEST) ds4 ds4-server ds4-bench ds4-agent
 	./ds4-eval --validate-cases
 	./ds4-eval --self-test-extractors
 	./ds4_agent_test
@@ -1069,11 +1072,16 @@ test: test-llguidance ds4_test ds4_agent_test ds4-eval q4k-dot-test mxfp4-dot-te
 	./tests/test_sampling
 	./tests/test_deepseek4_vision_image
 	./tests/test_image_decode
+	./tests/test_image_resize
 
 dspark-acceptance: ds4
 	DS4_DSPARK_MODEL="$(DS4_DSPARK_MODEL)" \
 	DS4_DSPARK_SUPPORT="$(DS4_DSPARK_SUPPORT)" \
 	sh tests/dspark_acceptance_fixture.sh
+
+.PHONY: dspark-indexer-threshold-boundary
+dspark-indexer-threshold-boundary: ds4_test
+	DS4_TEST_MODEL="$(DS4_TEST_MODEL)" DS4_TEST_DSPARK="$(DS4_DSPARK_SUPPORT)" ./ds4_test --dspark-indexer-threshold-boundary
 
 dspark-verify-depth: ds4_test
 	@if [ ! -f "$(DS4_TEST_MODEL)" ]; then \
@@ -1148,6 +1156,7 @@ test-llguidance: tests/test_llguidance
 	./tests/test_llguidance
 
 clean:
+	rm -f tests/test_image_resize
 	rm -f tests/test_metal_q2_decode_exact
 	rm -f tests/test_metal_q8_decode_shape
 	rm -f $(LLGUIDANCE_CONFIG) $(LLGUIDANCE_CONFIG).tmp tests/test_llguidance

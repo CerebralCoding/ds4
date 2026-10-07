@@ -529,6 +529,44 @@ static void test_glm_spec_rollback(void) {
 }
 #endif
 
+#ifndef DS4_NO_GPU
+static void test_dspark_lifetime_bypass(void) {
+    ds4_engine *engine = calloc(1, sizeof(*engine));
+    ds4_session *s = calloc(1, sizeof(*s));
+    assert(engine && s);
+    s->engine = engine;
+    engine->backend = DS4_BACKEND_METAL;
+    setenv("DS4_DSPARK_SCHEDULER", "1", 1);
+    setenv("DS4_DSPARK_SCHEDULER_WINDOW", "4", 1);
+    ds4_session_dspark_scheduler_begin_request(s);
+    for (int cycle = 0; cycle < 8; cycle++) {
+        assert(!s->dspark_sched_bypass);
+        while (ds4_session_dspark_scheduler_should_skip(s))
+            ds4_session_dspark_scheduler_note(s, 0, true, 0);
+        assert(s->dspark_sched_lifetime_cycles == (uint32_t)cycle);
+        ds4_session_dspark_scheduler_note(s, 0, false, 0);
+    }
+    assert(s->dspark_sched_bypass);
+    assert(ds4_session_dspark_scheduler_should_skip(s));
+    ds4_session_dspark_scheduler_begin_request(s);
+    assert(!s->dspark_sched_bypass && s->dspark_sched_lifetime_cycles == 0);
+    for (int cycle = 0; cycle < 32; cycle++) {
+        assert(!ds4_session_dspark_scheduler_should_skip(s));
+        ds4_session_dspark_scheduler_note(s, 2, false, 0);
+        assert(!s->dspark_sched_bypass);
+    }
+    engine->backend = DS4_BACKEND_CPU;
+    ds4_session_dspark_scheduler_begin_request(s);
+    for (int cycle = 0; cycle < 16; cycle++)
+        ds4_session_dspark_scheduler_note(s, 0, false, 0);
+    assert(!s->dspark_sched_bypass);
+    unsetenv("DS4_DSPARK_SCHEDULER");
+    unsetenv("DS4_DSPARK_SCHEDULER_WINDOW");
+    free(s);
+    free(engine);
+}
+#endif
+
 int main(void) {
     test_vision_prefix();
     test_vision_fingerprint_prefix();
@@ -538,6 +576,7 @@ int main(void) {
     test_snapshot_bytes();
     test_text_observations();
 #ifndef DS4_NO_GPU
+    test_dspark_lifetime_bypass();
     test_glm_attention_budget();
     test_glm_spec_rollback();
 #endif

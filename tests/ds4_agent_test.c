@@ -1467,6 +1467,43 @@ static int test_image_session_save(const char *model, const char *vision) {
     return agent_test_failures ? 1 : 0;
 }
 
+static void test_bash_truncation_notice(void) {
+    char path[] = "tests/.bash-truncation-XXXXXX";
+    int fd = mkstemp(path);
+    AGENT_TEST_ASSERT(fd >= 0);
+    if (fd < 0) return;
+    FILE *fp = fdopen(fd, "w+");
+    AGENT_TEST_ASSERT(fp != NULL);
+    if (!fp) { close(fd); unlink(path); return; }
+    agent_bash_job job = {0};
+    pthread_mutex_init(&job.mu, NULL);
+    snprintf(job.path, sizeof(job.path), "%s", path);
+    const size_t sizes[] = {4, 150, AGENT_BASH_HEAD_BYTES + 1, AGENT_BASH_TAIL_BYTES + 1};
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); i++) {
+        rewind(fp);
+        AGENT_TEST_ASSERT(ftruncate(fd, 0) == 0);
+        for (size_t j = 0; j < sizes[i]; j++) fputs(i < 2 ? "x\n" : "x", fp);
+        fflush(fp);
+        job.bytes = sizes[i] * (i < 2 ? 2 : 1);
+        job.newline_count = i < 2 ? sizes[i] : 0;
+        job.last_byte = i < 2 ? '\n' : 'x';
+        for (int running = 0; running < 2; running++) {
+            job.running = running;
+            for (int tail = 0; tail < 2; tail++) {
+                job.observed_once = tail;
+                char *out = agent_bash_observation(&job, false, NULL);
+                bool truncated = i == 1 || (tail ? i == 3 : i >= 2);
+                AGENT_TEST_ASSERT((strstr(out, "WARNING: output truncated") != NULL) == truncated);
+                if (truncated) AGENT_TEST_ASSERT(strstr(out, path) != NULL);
+                free(out);
+            }
+        }
+    }
+    pthread_mutex_destroy(&job.mu);
+    fclose(fp);
+    unlink(path);
+}
+
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "--image-session-save")) return test_image_session_save(argv[2], argv[3]);
     if (argc == 3 && !strcmp(argv[1], "--flash-think-toggle")) return test_flash_thinking(argv[2]);
@@ -1492,6 +1529,7 @@ int main(int argc, char **argv) {
     test_streaming_file_tools();
     test_shell_spawn();
     test_background_jobs();
+    test_bash_truncation_notice();
     test_fragmented_terminal_input();
     test_shell_terminal_controls();
     test_markdown_literals();
